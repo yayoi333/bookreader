@@ -60,6 +60,53 @@ function applyFontSize() {
   document.documentElement.style.setProperty('--reader-size', `${getSettings().fontSize}px`);
 }
 
+// ---------------------------------------------------------------- インストール（Androidの共有メニューに出すために必要）
+
+let installPrompt = null;
+const isInstalled = () =>
+  window.matchMedia('(display-mode: standalone)').matches || window.matchMedia('(display-mode: minimal-ui)').matches;
+
+window.addEventListener('beforeinstallprompt', (e) => {
+  e.preventDefault();
+  installPrompt = e;
+  refreshInstallUi();
+});
+window.addEventListener('appinstalled', () => {
+  installPrompt = null;
+  toast('インストールしました。Xアプリの共有メニューに「よみあげ文庫」が出ます');
+  refreshInstallUi();
+});
+
+function installBoxHtml() {
+  if (!isAndroid || isInstalled()) return '';
+  return `
+    <section class="card install" id="install-box">
+      <h2>アプリとしてインストール</h2>
+      <p class="hint">Xアプリの共有メニューに出すには、ショートカットではなく<b>インストール</b>が必要です。</p>
+      <div class="row">
+        <button id="install-btn" class="primary" ${installPrompt ? '' : 'hidden'}>インストールする</button>
+        <span id="install-wait" class="hint" ${installPrompt ? 'hidden' : ''}>
+          ボタンが出ないときは、Chrome右上の「︙」→「ホーム画面に追加」→「<b>インストール</b>」を選んでください（「ショートカットを作成」ではありません）。</span>
+      </div>
+    </section>`;
+}
+
+function refreshInstallUi() {
+  const btn = $('#install-btn');
+  if (btn) {
+    btn.hidden = !installPrompt;
+    $('#install-wait').hidden = Boolean(installPrompt);
+    btn.onclick = async () => {
+      if (!installPrompt) return;
+      installPrompt.prompt();
+      await installPrompt.userChoice.catch(() => null);
+      installPrompt = null;
+      refreshInstallUi();
+    };
+  }
+  if (isInstalled()) $('#install-box')?.remove();
+}
+
 // ---------------------------------------------------------------- 取り込み
 
 async function saveImported(doc, { forceDrive = false } = {}) {
@@ -169,7 +216,7 @@ async function handleIncoming() {
 
 async function renderLibrary() {
   const list = await docs.all();
-  view.innerHTML = `
+  view.innerHTML = `${installBoxHtml()}
     <section class="card import">
       <label for="import-input" class="label">XのURL・記事のURL・テキストを貼り付け</label>
       <textarea id="import-input" rows="3" placeholder="https://x.com/…/status/…"></textarea>
@@ -187,6 +234,7 @@ async function renderLibrary() {
              <a href="#/help">使い方</a>のショートカット／ブックマークレットで送ってください。</p>`
       }
     </section>`;
+  refreshInstallUi();
   $('#import-btn').onclick = () => {
     const v = $('#import-input').value;
     if (v.trim()) importAndOpen(v);
@@ -603,8 +651,15 @@ function renderHelp() {
 
     <section class="card">
       <h2>Android：共有メニューから送る</h2>
-      <p>Chromeでこのページを開き、メニューの「<b>ホーム画面に追加</b>（インストール）」をすると、Xアプリの共有メニューに「よみあげ文庫」が出ます。</p>
-      <p class="hint">${isAndroid ? '' : '（Androidのみ。iPhoneは上のショートカットを使います）'}</p>
+      ${isAndroid ? `<p><b>いまの状態：</b>${isInstalled() ? '✅ アプリとして開いています（インストール済み）' : '⚠️ ブラウザで開いています'}</p>` : ''}
+      <ol>
+        <li>Chromeでこのページを開き、右上「︙」→「ホーム画面に追加」→「<b>インストール</b>」を選ぶ（本棚画面の「インストールする」ボタンでもOK）。<br>
+          <small>「ショートカットを作成」だと共有メニューには出ません。すでにショートカットを作った場合は、ホーム画面のアイコンを削除してから入れ直してください。</small></li>
+        <li>インストール後、<b>ホーム画面のアイコンから一度起動</b>する。</li>
+        <li>Xアプリで共有 → 一覧に無ければ一番右の「<b>その他</b>」や「編集」から「よみあげ文庫」を探す（よく使うと上に出てきます）。</li>
+      </ol>
+      <p class="hint">共有メニューを使わない方法：Xで「リンクをコピー」→ よみあげ文庫を開いて「クリップボードから」。</p>
+      ${isAndroid ? '' : '<p class="hint">（Androidのみ。iPhoneは上のショートカットを使います）</p>'}
     </section>
 
     <section class="card">
