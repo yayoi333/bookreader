@@ -177,3 +177,4 @@ code.clip { max-height: 4.5em; overflow: hidden; }
 .toast.show { opacity: 1; transform: translate(-50%, 0); }
 
 .version { text-align: center; font-size: 12px; color: var(--ink-soft); margin: 24px 0 8px; }
+.boot-error { margin: 16px; padding: 12px; border-radius: 10px; background: #fde8e4; color: #8a1f0c; font-size: 13px; overflow-wrap: anywhere; }
