@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>よみあげ文庫</title>
+  <meta name="description" content="Xの記事やWeb記事、Driveのメモを、本文だけ読み上げる自分用の図書館">
+  <meta name="theme-color" content="#f5efe3" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#1c1a17" media="(prefers-color-scheme: dark)">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="icons/icon-192.png">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="よみあげ文庫">
+  <link rel="stylesheet" href="css/app.css">
+  <script src="vendor/Readability.js" defer></script>
+  <script type="module" src="js/app.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="#/"><img src="icons/icon.svg" alt="" width="26" height="26"><span>よみあげ文庫</span></a>
+    <nav class="nav">
+      <a href="#/">本棚</a>
+      <a href="#/drive">Drive</a>
+      <a href="#/settings">設定</a>
+      <a href="#/help">使い方</a>
+    </nav>
+  </header>
+
+  <main id="view" class="container"></main>
+
+  <div id="player" class="player" hidden>
+    <input id="p-seek" class="p-seek" type="range" min="0" max="0" value="0" aria-label="読む位置">
+    <div class="p-row">
+      <button id="p-title" class="p-title" title="開く"></button>
+      <div class="p-controls">
+        <button id="p-prev" class="icon-btn" aria-label="前の文"></button>
+        <button id="p-play" class="p-play" aria-label="再生"></button>
+        <button id="p-next" class="icon-btn" aria-label="次の文"></button>
+        <select id="p-rate" class="p-rate" aria-label="再生速度"></select>
+      </div>
+    </div>
+    <div class="p-sub"><span id="p-pos"></span><span id="p-engine"></span></div>
+  </div>
+
+  <div id="busy" class="busy" hidden><div class="busy-box"><span class="spinner"></span><span id="busy-msg">取り込み中…</span></div></div>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+</body>
+</html>
