@@ -11,6 +11,7 @@ const $ = (sel, root = document) => root.querySelector(sel);
 const view = $('#view');
 const player = new Player();
 const APP_URL = new URL('./', location.href).href;
+export const APP_VERSION = '0.1.2';
 
 const esc = (s) =>
   String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
@@ -78,7 +79,7 @@ window.addEventListener('appinstalled', () => {
 });
 
 function installBoxHtml() {
-  if (!isAndroid || isInstalled()) return '';
+  if (isIOS || isInstalled()) return '';
   return `
     <section class="card install" id="install-box">
       <h2>アプリとしてインストール</h2>
@@ -723,6 +724,7 @@ async function route() {
   else if (hash === '#/drive') await renderDrive();
   else if (hash === '#/help') renderHelp();
   else await renderLibrary();
+  view.insertAdjacentHTML('beforeend', `<p class="version">よみあげ文庫 v${APP_VERSION}</p>`);
 }
 
 async function init() {
