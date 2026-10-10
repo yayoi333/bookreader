@@ -102,8 +102,18 @@ function save_(req) {
   const title = String(req.title || '無題').slice(0, 200);
   const doc = DocumentApp.create(title);
   const body = doc.getBody();
-  const first = body.getParagraphs()[0];
-  first.setText(title).setHeading(DocumentApp.ParagraphHeading.TITLE);
+  // 新規ドキュメントに最初の空段落があるとは限らない（無い場合もある）ので、追加してから空段落を消す
+  const leading = body.getParagraphs();
+  body.appendParagraph(title).setHeading(DocumentApp.ParagraphHeading.TITLE);
+  leading.forEach(function (p) {
+    if (!p.getText()) {
+      try {
+        p.removeFromParent();
+      } catch (e) {
+        // 最後の1段落は消せないことがあるが、残っても害はない
+      }
+    }
+  });
   const meta = [req.author, req.url].filter(String).join(' / ');
   if (meta) {
     const p = body.appendParagraph(meta).setHeading(DocumentApp.ParagraphHeading.SUBTITLE);

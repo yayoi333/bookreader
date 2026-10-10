@@ -11,7 +11,7 @@ const $ = (sel, root = document) => root.querySelector(sel);
 const view = $('#view');
 const player = new Player();
 const APP_URL = new URL('./', location.href).href;
-export const APP_VERSION = '0.1.3';
+export const APP_VERSION = '0.1.4';
 
 const esc = (s) =>
   String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
@@ -134,7 +134,12 @@ async function saveToDrive(doc, { quiet = false } = {}) {
     toast(quiet ? 'Driveにも保存しました' : 'Driveに保存しました');
     if (location.hash === `#/doc/${doc.id}`) route();
   } catch (e) {
-    toast(`Drive保存に失敗：${e.message}`, 5000);
+    toast(`Drive保存に失敗：${e.message}`, 6000);
+    const btn = $('#drive-btn');
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = 'Driveに保存';
+    }
   }
 }
 
