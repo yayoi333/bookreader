@@ -12,7 +12,7 @@
   <link rel="apple-touch-icon" href="icons/icon-192.png">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-title" content="よみあげ文庫">
-  <link rel="stylesheet" href="css/app.css?v=0.1.5">
+  <link rel="stylesheet" href="css/app.css?v=0.1.6">
   <script>
     // 診断用：プログラムの読み込みに失敗したら画面に理由を出す
     window.__bootErrors = [];
@@ -25,7 +25,7 @@
     window.addEventListener('unhandledrejection', function (e) { __showBootError(String(e.reason && e.reason.message || e.reason)); });
   </script>
   <script src="vendor/Readability.js" defer></script>
-  <script type="module" src="js/app.js?v=0.1.5" onerror="__showBootError('js/app.js を読み込めません')"></script>
+  <script type="module" src="js/app.js?v=0.1.6" onerror="__showBootError('js/app.js を読み込めません')"></script>
 </head>
 <body>
   <header class="topbar">
@@ -39,7 +39,7 @@
   </header>
 
   <main id="view" class="container">
-    <p class="empty" id="boot-msg">読み込み中…（v0.1.5）<br>この表示が消えない場合は、プログラムが動いていません。</p>
+    <p class="empty" id="boot-msg">読み込み中…（v0.1.6）<br>この表示が消えない場合は、プログラムが動いていません。</p>
   </main>
   <p id="boot-error" class="boot-error" hidden></p>
 

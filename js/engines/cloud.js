@@ -68,6 +68,66 @@ async function addUsage(chars) {
 
 export const monthlyUsage = () => kv.get(monthKey(), 0);
 
+// ---- 「文が長すぎる」への対処 ----
+const isTooLong = (e) => e && e.status === 400 && /too long|sentence/i.test(e.raw || '');
+
+function terminate(text) {
+  const t = text.trim().replace(/[、，,；;：:]$/, '');
+  return /[。．！？!?」』）)]$/.test(t) ? t : t + '。';
+}
+
+/** 文の真ん中あたりの区切りやすい位置で2つに分ける */
+export function halve(text) {
+  const mid = Math.floor(text.length / 2);
+  let cut = -1;
+  for (let d = 0; d < mid; d++) {
+    for (const i of [mid + d, mid - d]) {
+      if (i > 0 && i < text.length && /[、，,／/・\s　]/.test(text[i - 1])) {
+        cut = i;
+        break;
+      }
+    }
+    if (cut > 0) break;
+  }
+  if (cut < 0) cut = mid;
+  return [text.slice(0, cut), text.slice(cut)];
+}
+
+async function mapLimit(items, limit, fn) {
+  const out = new Array(items.length);
+  let next = 0;
+  const worker = async () => {
+    while (next < items.length) {
+      const i = next++;
+      out[i] = await fn(items[i], i);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return out;
+}
+
+async function synthesizePieces(key, voice, chunk) {
+  let skipped = 0;
+  const piece = async (text, depth) => {
+    try {
+      return [await synthesize(key, voice, terminate(text))];
+    } catch (e) {
+      if (!isTooLong(e)) throw e;
+      if (depth >= 3 || text.length < 12) {
+        skipped++;
+        return [];
+      }
+      const [a, b] = halve(text);
+      return [...(await piece(a, depth + 1)), ...(await piece(b, depth + 1))];
+    }
+  };
+  const texts = chunk.offsets.map((o) => chunk.text.slice(o.at, o.at + o.len));
+  const parts = (await mapLimit(texts, 4, (t) => piece(t, 0))).flat();
+  // 全部読めなかったときは無音を入れて先へ進む
+  const blob = parts.length ? new Blob(parts, { type: 'audio/mpeg' }) : await (await fetch(silentWavUrl())).blob();
+  return { blob, skipped };
+}
+
 // ---- 生成した音声を Drive で共有する ----
 export const driveAudioEnabled = () => driveConfigured() && getSettings().driveAudio !== false;
 
@@ -306,11 +366,16 @@ export class CloudEngine {
         try {
           blob = await synthesize(cloudKey, cloudVoice, chunk.text);
         } catch (e) {
-          // 「文が長すぎる」と言われたら、すべての文を句点で終わらせて再試行
-          if (e.status === 400 && /too long|sentence/i.test(e.raw)) {
+          if (!isTooLong(e)) throw e;
+          // 「文が長すぎる」と言われたら、①すべての文を句点で終わらせて再試行
+          try {
             blob = await synthesize(cloudKey, cloudVoice, terminateSoftSplits(chunk));
-          } else {
-            throw e;
+          } catch (e2) {
+            if (!isTooLong(e2)) throw e2;
+            // ②それでもダメなら1文ずつ（さらに細かく）作ってつなげる。どうしても断られる文は読み飛ばす
+            const res = await synthesizePieces(cloudKey, cloudVoice, chunk);
+            blob = res.blob;
+            if (res.skipped) this.host.onNotice?.(`表などの読み上げられない部分（${res.skipped}か所）を読み飛ばしました`);
           }
         }
         await audioCache.put(key, blob).catch(() => {});

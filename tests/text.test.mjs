@@ -114,6 +114,10 @@ test('段落の分け方が違っても同じ音声用テキストになる（�
   assert.equal(text(gdocs), text(oneBlock));
 });
 
+test('表の区切り（｜）は文の区切りにし、修飾文字（ˆ）は読まない', () => {
+  assert.equal(normalizeForSpeech('項目 | 内容｜料金ˆ'), '項目。内容。料金');
+});
+
 test('記号（◠ ♪ ◎ 矢印など）は読まない', () => {
   assert.equal(normalizeForSpeech('◠◠《項目》♪ A⇔B'), '《項目》 A、B');
 });

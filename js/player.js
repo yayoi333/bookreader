@@ -168,6 +168,10 @@ export class Player extends EventTarget {
     this.emit('error', message);
   }
 
+  onNotice(message) {
+    this.emit('notice', message);
+  }
+
   onLoading(v) {
     this.loading = v;
     this.emit('state');

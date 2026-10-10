@@ -119,7 +119,13 @@ test('ブラウザでの取り込み・読み上げ・進捗・クラウド音�
         { name: 'ja-JP-Chirp3-HD-Aoede', ssmlGender: 'FEMALE', languageCodes: ['ja-JP'] },
       ] }) });
     }
-    ttsRequests.push(JSON.parse(req.postData()));
+    const body = JSON.parse(req.postData());
+    ttsRequests.push(body);
+    // Google の「文が長すぎる」を再現：「表の行」を含む長いリクエストは断る。「絶対に読めない」は常に断る
+    const t = body.input.text;
+    if ((t.includes('表の行') && t.length > 40) || t.includes('絶対に読めない')) {
+      return route.fulfill({ status: 400, contentType: 'application/json', headers, body: JSON.stringify({ error: { code: 400, message: 'This request contains sentences that are too long. Sentence starting with: "表の行" is too long.' } }) });
+    }
     return route.fulfill({ contentType: 'application/json', headers, body: JSON.stringify({ audioContent: wavBase64() }) });
   });
   const page = await context.newPage();
@@ -249,6 +255,29 @@ test('ブラウザでの取り込み・読み上げ・進捗・クラウド音�
       assert.ok(bytes.every((b) => b < 5000));
       // 文章は欠けずにすべて送られている
       assert.equal(sent.map((r) => r.input.text).join('').replace(/。/g, ''), ('長い記事' + long).replace(/。/g, ''));
+    });
+
+    await t.test('クラウド音声：「文が長すぎる」と断られても1文ずつ作り直し、読めない文だけ飛ばして最後まで再生する', async () => {
+      const before = ttsRequests.length;
+      await page.goto(base + '#/');
+      await page.waitForSelector('#import-input');
+      await page.fill('#import-input', '表のある記事\n\n表の行その1です。表の行その2です。絶対に読めない文。最後の文です。');
+      await page.click('#import-btn');
+      await page.waitForSelector('#read-btn');
+      await page.evaluate(() => {
+        window.__toasts = [];
+        new MutationObserver(() => window.__toasts.push(document.querySelector('#toast').textContent))
+          .observe(document.querySelector('#toast'), { childList: true, characterData: true, subtree: true });
+      });
+      await page.click('#read-btn');
+      await page.waitForFunction(() => document.querySelector('#p-pos').textContent === '読了', null, { timeout: 20000 });
+      const toasts = await page.evaluate(() => window.__toasts);
+      assert.ok(toasts.some((m) => /（1か所）を読み飛ばしました/.test(m)), JSON.stringify(toasts));
+      assert.ok(!toasts.some((m) => /too long|長すぎ/.test(m)), 'エラーで止まっていない');
+      const texts = ttsRequests.slice(before).map((r) => r.input.text);
+      // 1回目（まとめて）→ 2回目（句点を補って）→ 1文ずつ
+      assert.ok(texts.includes('表の行その1です。'));
+      assert.ok(texts.includes('最後の文です。'));
     });
 
     await t.test('Drive連携：接続テスト・自動保存・Driveの文書を開く', async () => {

@@ -11,7 +11,7 @@ const $ = (sel, root = document) => root.querySelector(sel);
 const view = $('#view');
 const player = new Player();
 const APP_URL = new URL('./', location.href).href;
-export const APP_VERSION = '0.1.5';
+export const APP_VERSION = '0.1.6';
 
 const esc = (s) =>
   String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
@@ -399,6 +399,7 @@ function setupPlayerBar() {
   player.addEventListener('load', updatePlayerBar);
   player.addEventListener('rate', () => (rateSel.value = String(getSettings().rate)));
   player.addEventListener('error', (e) => toast(e.detail, 6000));
+  player.addEventListener('notice', (e) => toast(e.detail, 5000));
   player.addEventListener('ended', () => toast('最後まで読みました'));
 }
 

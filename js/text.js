@@ -73,6 +73,9 @@ export function normalizeForSpeech(input) {
   // 装飾記号
   s = s.replace(/[■□◆◇●○▼▽▲△★☆▶►▪▫•※]/g, ' ');
   s = s.replace(/[→⇒➡]|[\u2190-\u21ff]/g, '、');
+  // 表の区切り（｜）は文の区切りにする。発音記号のような修飾文字は読まない
+  s = s.replace(/\s*[|｜]\s*/g, '。');
+  s = s.replace(/[\u02b0-\u02ff]/g, '');
   // 図形・その他の記号（◠ ◎ ♪ など）は読まない
   s = s.replace(/[\u25a0-\u25ff\u2600-\u27bf]/g, ' ');
   // 連続する感嘆符・疑問符・長音などをまとめる
