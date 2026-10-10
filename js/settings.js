@@ -18,6 +18,7 @@ const DEFAULTS = {
   gasUrl: '',
   gasToken: '',
   autoSaveDrive: false,
+  driveAudio: true, // クラウド音声をDriveにも保存して、別の端末で作り直さない
 };
 
 let cache;

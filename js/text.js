@@ -4,12 +4,16 @@ const TERMINATORS = '。．！？!?';
 const CLOSERS = '」』）)】〕”’"\'';
 const SOFT_BREAKS = '、，,；;：: 　';
 
-export const DEFAULT_MAX_SENTENCE = 120;
+// Googleの高品質音声(Chirp 3 HD)は日本語で80〜100字を超える文を「長すぎる」と断ることがあるため短めに区切る
+export const DEFAULT_MAX_SENTENCE = 80;
+
+// Googleドキュメントの改行（\r や \u000b）も行の区切りとして扱う
+const LINE_BREAK = /\r\n|[\r\n\u000b\u2028\u2029]/;
 
 /** 文に分割する。長すぎる文は読点などで分割する（Chrome の長文途切れ対策） */
 export function splitSentences(text, maxLen = DEFAULT_MAX_SENTENCE) {
   const out = [];
-  for (const raw of String(text ?? '').split(/\r?\n/)) {
+  for (const raw of String(text ?? '').split(LINE_BREAK)) {
     const line = raw.trim();
     if (!line) continue;
     let buf = '';
@@ -68,7 +72,9 @@ export function normalizeForSpeech(input) {
   s = s.replace(/[@＠](?=[A-Za-z0-9_])/g, '');
   // 装飾記号
   s = s.replace(/[■□◆◇●○▼▽▲△★☆▶►▪▫•※]/g, ' ');
-  s = s.replace(/[→⇒➡]/g, '、');
+  s = s.replace(/[→⇒➡]|[\u2190-\u21ff]/g, '、');
+  // 図形・その他の記号（◠ ◎ ♪ など）は読まない
+  s = s.replace(/[\u25a0-\u25ff\u2600-\u27bf]/g, ' ');
   // 連続する感嘆符・疑問符・長音などをまとめる
   s = s.replace(/([！!？?])[！!？?]+/g, '$1');
   s = s.replace(/([。、…・〜~＝=―─━_\-])\1{2,}/g, '$1');
@@ -90,7 +96,7 @@ export function buildSegments(blocks, maxLen = DEFAULT_MAX_SENTENCE) {
 /** プレーンテキスト → ブロック配列（空行・改行で段落分け） */
 export function blocksFromPlainText(text) {
   const blocks = [];
-  for (const para of String(text ?? '').replace(/\r\n?/g, '\n').split(/\n{2,}/)) {
+  for (const para of String(text ?? '').replace(/\r\n|[\r\u000b\u2028\u2029]/g, '\n').split(/\n{2,}/)) {
     const lines = para.split('\n').map((l) => l.trim()).filter(Boolean);
     if (!lines.length) continue;
     // 箇条書きっぽい行は1行ずつブロックにする
@@ -117,6 +123,7 @@ const encoder = new TextEncoder();
 export const byteLength = (s) => encoder.encode(s).length;
 
 const ENDS_SENTENCE = /[。．！？!?」』）)】〕”"]$/;
+const SOFT_END = /[、，,；;：:]$/;
 const ASCII_WORD_END = /[A-Za-z0-9]$/;
 const ASCII_WORD_START = /^[A-Za-z0-9]/;
 
@@ -138,12 +145,13 @@ export function chunkSegments(segs, { maxBytes = 4500, firstMaxBytes = 1000 } = 
       else if (leadStart === null) leadStart = i;
       continue;
     }
+    // 段落の区切り方に依存しない連結にする（端末が違っても、Drive経由でも同じ文章＝同じ音声になる）
     let sep = '';
     if (cur && prevSeg) {
-      if (prevSeg.block !== s.block) {
-        sep = (ENDS_SENTENCE.test(cur.text) ? '' : '。') + '\n';
-      } else if (ASCII_WORD_END.test(cur.text) && ASCII_WORD_START.test(s.speech)) {
+      if (ASCII_WORD_END.test(cur.text) && ASCII_WORD_START.test(s.speech)) {
         sep = ' ';
+      } else if (!ENDS_SENTENCE.test(cur.text) && !SOFT_END.test(cur.text)) {
+        sep = '。'; // 句点のない行（見出し・箇条書きなど）で文を区切る
       }
     }
     const limit = chunks.length === 0 ? firstMaxBytes : maxBytes;
@@ -170,15 +178,12 @@ export function chunkSegments(segs, { maxBytes = 4500, firstMaxBytes = 1000 } = 
 
 /** 読点で切った文に句点を補う（クラウドTTSの「文が長すぎる」エラー時の再試行用） */
 export function terminateSoftSplits(chunk) {
-  let text = '';
-  let last = 0;
-  for (const o of chunk.offsets) {
-    text += chunk.text.slice(last, o.at);
-    const seg = chunk.text.slice(o.at, o.at + o.len);
-    text += ENDS_SENTENCE.test(seg) ? seg : seg.replace(/[、，,；;：:]$/, '') + '。';
-    last = o.at + o.len;
-  }
-  return text + chunk.text.slice(last);
+  return chunk.offsets
+    .map((o) => {
+      const seg = chunk.text.slice(o.at, o.at + o.len);
+      return ENDS_SENTENCE.test(seg) ? seg : seg.replace(SOFT_END, '') + '。';
+    })
+    .join('');
 }
 
 /** チャンク内の再生位置（0〜1）→ 読み上げ単位のインデックス */

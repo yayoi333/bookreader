@@ -1,5 +1,5 @@
 // オフラインでも本棚を開けるようにする。更新を確実に届けるため、自サイトのファイルは「ネット優先・失敗したらキャッシュ」
-const CACHE = 'yomiage-v4';
+const CACHE = 'yomiage-v5';
 const SHELL = [
   './',
   'index.html',

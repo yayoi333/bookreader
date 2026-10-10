@@ -3,6 +3,8 @@
 // 無料枠：Chirp 3 HD / Neural2 は毎月100万文字、WaveNet / Standard は毎月400万文字（2026年10月時点の公式料金表）
 import { chunkSegments, chunkIndexOf, segmentAtRatio, ratioOfSegment, terminateSoftSplits } from '../text.js';
 import { audioCache, kv } from '../db.js';
+import { drive, driveConfigured } from '../drive.js';
+import { getSettings } from '../settings.js';
 import { base64ToBlob, sha256Hex, silentWavUrl } from '../audio-util.js';
 
 const API = 'https://texttospeech.googleapis.com/v1';
@@ -34,6 +36,7 @@ export function freeTierFor(voice) {
 }
 
 export async function synthesize(key, voice, text) {
+  if (!key) throw new Error('クラウド音声のAPIキーが未設定です（設定画面）。Driveに保存済みの音声だけなら無くても再生できます');
   const languageCode = voice.split('-').slice(0, 2).join('-') || 'ja-JP';
   const res = await fetch(`${API}/text:synthesize?key=${encodeURIComponent(key)}`, {
     method: 'POST',
@@ -64,6 +67,37 @@ async function addUsage(chars) {
 }
 
 export const monthlyUsage = () => kv.get(monthKey(), 0);
+
+// ---- 生成した音声を Drive で共有する ----
+export const driveAudioEnabled = () => driveConfigured() && getSettings().driveAudio !== false;
+
+async function driveAudioGet(key) {
+  try {
+    const r = await drive.audioGet(key);
+    return r.found ? base64ToBlob(r.data, 'audio/mpeg') : null;
+  } catch {
+    return null; // Drive に繋がらなくても生成で続行する
+  }
+}
+
+function blobToBase64(blob) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(String(r.result).split(',')[1] || '');
+    r.onerror = () => reject(r.error);
+    r.readAsDataURL(blob);
+  });
+}
+
+async function driveAudioPut(key, blob) {
+  if (await kv.get(`drive-audio:${key}`, false)) return;
+  try {
+    await drive.audioPut(key, await blobToBase64(blob));
+    await kv.set(`drive-audio:${key}`, true);
+  } catch {
+    // 次に再生したときにもう一度試す
+  }
+}
 
 export class CloudEngine {
   constructor(host) {
@@ -118,11 +152,6 @@ export class CloudEngine {
 
   start(index) {
     const gen = ++this.gen;
-    const { cloudKey } = this.host.settings();
-    if (!cloudKey) {
-      this.host.onError('クラウド音声のAPIキーが未設定です（設定画面）');
-      return;
-    }
     this.playing = true;
     this.unlock();
     this.ensureChunks();
@@ -267,11 +296,17 @@ export class CloudEngine {
     const p = (async () => {
       const key = await sha256Hex(`${cloudVoice}\n${chunk.text}`);
       let blob = await audioCache.get(key);
+      // 1) この端末に無ければ Drive を探す（別の端末で作った音声を使い回す。生成し直さない）
+      if (!blob && driveAudioEnabled()) {
+        blob = await driveAudioGet(key);
+        if (blob) await audioCache.put(key, blob).catch(() => {});
+      }
+      // 2) どこにも無ければ生成する
       if (!blob) {
         try {
           blob = await synthesize(cloudKey, cloudVoice, chunk.text);
         } catch (e) {
-          // 読点で切った長い文が「文が長すぎる」と言われたら句点を補って再試行
+          // 「文が長すぎる」と言われたら、すべての文を句点で終わらせて再試行
           if (e.status === 400 && /too long|sentence/i.test(e.raw)) {
             blob = await synthesize(cloudKey, cloudVoice, terminateSoftSplits(chunk));
           } else {
@@ -280,6 +315,8 @@ export class CloudEngine {
         }
         await audioCache.put(key, blob).catch(() => {});
       }
+      // 3) Drive にまだ無ければ裏で保存（以前この端末だけで作った音声も、再生時にDriveへ送る）
+      if (driveAudioEnabled()) driveAudioPut(key, blob);
       if (this.chunks === chunks) this.blobs.set(ci, blob);
       return blob;
     })();

@@ -94,14 +94,28 @@ test('チャンク分割：バイト上限を守り、最初は小さく、全�
   assert.deepEqual(all, segs.map((s) => s.speech));
 });
 
-test('段落の境目には句点と改行を入れ、英単語の間には空白を入れる', () => {
+test('句点のない行の後には句点を補い、英単語の間には空白を入れる', () => {
   const segs = [
     { block: 0, text: '見出し', speech: '見出し' },
     { block: 1, text: 'Hello', speech: 'Hello' },
     { block: 1, text: 'world.', speech: 'world.' },
   ];
   const [c] = chunkSegments(segs);
-  assert.equal(c.text, '見出し。\nHello world.');
+  assert.equal(c.text, '見出し。Hello world.');
+});
+
+test('段落の分け方が違っても同じ音声用テキストになる（端末間・Drive経由で音声を使い回すため）', () => {
+  const oneBlock = buildSegments([{ type: 'p', text: '一行目\n二行目。三行目' }]);
+  const split = buildSegments([{ type: 'p', text: '一行目' }, { type: 'p', text: '二行目。' }, { type: 'p', text: '三行目' }]);
+  const gdocs = buildSegments([{ type: 'p', text: '一行目\r二行目。\u000b三行目' }]);
+  const text = (segs) => chunkSegments(segs).map((c) => c.text).join('|');
+  assert.equal(text(oneBlock), '一行目。二行目。三行目');
+  assert.equal(text(split), text(oneBlock));
+  assert.equal(text(gdocs), text(oneBlock));
+});
+
+test('記号（◠ ♪ ◎ 矢印など）は読まない', () => {
+  assert.equal(normalizeForSpeech('◠◠《項目》♪ A⇔B'), '《項目》 A、B');
 });
 
 test('読み上げ対象が空の文（URLだけ等）はチャンクに吸収される', () => {
@@ -129,8 +143,16 @@ test('再生位置と読み上げ単位の対応', () => {
   assert.ok(Math.abs(ratioOfSegment(c, 1) - 4 / 12) < 1e-9);
 });
 
-test('読点で切れた文に句点を補う', () => {
-  const segs = buildSegments([{ type: 'p', text: 'あ'.repeat(70) + '、' + 'い'.repeat(70) + '。' }]);
+test('「文が長すぎる」ときの再試行用：すべての文を句点で終わらせ、二重の句点は作らない', () => {
+  const segs = buildSegments([
+    { type: 'h', text: '見出し' },
+    { type: 'p', text: 'あ'.repeat(70) + '、' + 'い'.repeat(70) + '。' },
+  ]);
   const [c] = chunkSegments(segs);
-  assert.equal(terminateSoftSplits(c), 'あ'.repeat(70) + '。' + 'い'.repeat(70) + '。');
+  assert.equal(terminateSoftSplits(c), '見出し。' + 'あ'.repeat(70) + '。' + 'い'.repeat(70) + '。');
+});
+
+test('文の長さは既定で80字以内（Googleの高品質音声の制限対策）', () => {
+  const segs = buildSegments([{ type: 'p', text: 'う'.repeat(500) }]);
+  assert.ok(segs.every((s) => s.text.length <= 80));
 });

@@ -11,7 +11,7 @@ const $ = (sel, root = document) => root.querySelector(sel);
 const view = $('#view');
 const player = new Player();
 const APP_URL = new URL('./', location.href).href;
-export const APP_VERSION = '0.1.4';
+export const APP_VERSION = '0.1.5';
 
 const esc = (s) =>
   String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
@@ -480,6 +480,7 @@ async function renderSettings() {
       <label class="label" for="gas-token">トークン</label>
       <input id="gas-token" type="password" autocomplete="off" value="${esc(s.gasToken)}">
       <label class="check"><input type="checkbox" id="auto-drive" ${s.autoSaveDrive ? 'checked' : ''}> 取り込んだらDriveにも自動保存</label>
+      <label class="check"><input type="checkbox" id="drive-audio" ${s.driveAudio !== false ? 'checked' : ''}> クラウド音声をDriveにも保存（別の端末では作り直さず、Driveの音声を使う）</label>
       <div class="row"><button id="gas-test" class="ghost">接続テスト</button></div>
       <p class="hint">設定方法は <a href="#/help">使い方</a> の「Drive連携」を参照。Web記事の取り込み（URLから本文を取得）にも使います。</p>
     </section>
@@ -543,6 +544,7 @@ async function renderSettings() {
   $('#gas-url').onchange = (e) => saveSettings({ gasUrl: e.target.value.trim() });
   $('#gas-token').onchange = (e) => saveSettings({ gasToken: e.target.value.trim() });
   $('#auto-drive').onchange = (e) => saveSettings({ autoSaveDrive: e.target.checked });
+  $('#drive-audio').onchange = (e) => saveSettings({ driveAudio: e.target.checked });
   $('#gas-test').onclick = async () => {
     saveSettings({ gasUrl: $('#gas-url').value.trim(), gasToken: $('#gas-token').value.trim() });
     try {

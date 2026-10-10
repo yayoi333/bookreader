@@ -45,6 +45,10 @@ function doPost(e) {
         return json_(list_(req.q));
       case 'get':
         return json_(get_(req.id));
+      case 'audioGet':
+        return json_(audioGet_(req.key));
+      case 'audioPut':
+        return json_(audioPut_(req.key, req.data));
       default:
         return json_({ ok: false, error: '不明な操作です: ' + req.action });
     }
@@ -97,11 +101,27 @@ function fetchPage_(url) {
   return { ok: true, url: url, html: blob.getDataAsString(charset) };
 }
 
-/** 記事をGoogleドキュメントとして保存 */
+/** 同じURLの記事がフォルダにあれば返す（二重保存を防ぐ） */
+function findByUrl_(url) {
+  if (!url) return null;
+  const it = getFolder_().getFiles();
+  while (it.hasNext()) {
+    const f = it.next();
+    if (f.getMimeType() === MimeType.GOOGLE_DOCS && f.getDescription() === url) return f;
+  }
+  return null;
+}
+
+/** 記事をGoogleドキュメントとして保存（同じURLの記事は上書き） */
 function save_(req) {
   const title = String(req.title || '無題').slice(0, 200);
-  const doc = DocumentApp.create(title);
+  const existing = findByUrl_(req.url);
+  const doc = existing ? DocumentApp.openById(existing.getId()) : DocumentApp.create(title);
   const body = doc.getBody();
+  if (existing) {
+    body.clear();
+    doc.setName(title);
+  }
   // 新規ドキュメントに最初の空段落があるとは限らない（無い場合もある）ので、追加してから空段落を消す
   const leading = body.getParagraphs();
   body.appendParagraph(title).setHeading(DocumentApp.ParagraphHeading.TITLE);
@@ -123,23 +143,26 @@ function save_(req) {
     }
   }
   (req.blocks || []).forEach(function (b) {
-    const text = String(b.text || '');
-    if (!text.trim()) return;
-    if (b.type === 'h') {
-      body.appendParagraph(text).setHeading(DocumentApp.ParagraphHeading.HEADING2);
-    } else if (b.type === 'li') {
-      body.appendListItem(text).setGlyphType(DocumentApp.GlyphType.BULLET);
-    } else if (b.type === 'quote') {
-      body.appendParagraph(text).setIndentStart(36).setIndentFirstLine(36).setItalic(true);
-    } else {
-      body.appendParagraph(text);
-    }
+    // 段落内の改行は別の段落にする（読み戻したときに文の区切りが変わらないように）
+    String(b.text || '').split('\n').forEach(function (line) {
+      const text = line.trim();
+      if (!text) return;
+      if (b.type === 'h') {
+        body.appendParagraph(text).setHeading(DocumentApp.ParagraphHeading.HEADING2);
+      } else if (b.type === 'li') {
+        body.appendListItem(text).setGlyphType(DocumentApp.GlyphType.BULLET);
+      } else if (b.type === 'quote') {
+        body.appendParagraph(text).setIndentStart(36).setIndentFirstLine(36).setItalic(true);
+      } else {
+        body.appendParagraph(text);
+      }
+    });
   });
   doc.saveAndClose();
   const file = DriveApp.getFileById(doc.getId());
-  file.moveTo(getFolder_());
+  if (!existing) file.moveTo(getFolder_());
   if (req.url) file.setDescription(String(req.url));
-  return { ok: true, id: doc.getId(), url: doc.getUrl() };
+  return { ok: true, id: doc.getId(), url: doc.getUrl(), updated: Boolean(existing) };
 }
 
 /** 一覧：q が空なら「よみあげ文庫」フォルダ、あればDrive全体をファイル名で検索 */
@@ -156,10 +179,25 @@ function list_(q) {
   while (it.hasNext() && files.length < 300) {
     const f = it.next();
     if (READABLE_MIME.indexOf(f.getMimeType()) < 0 && !/\.(txt|md)$/i.test(f.getName())) continue;
-    files.push({ id: f.getId(), name: f.getName(), updated: f.getLastUpdated().getTime(), mimeType: f.getMimeType() });
+    files.push({
+      id: f.getId(),
+      name: f.getName(),
+      updated: f.getLastUpdated().getTime(),
+      mimeType: f.getMimeType(),
+      source: f.getDescription() || '',
+    });
   }
   files.sort(function (a, b) { return b.updated - a.updated; });
-  return { ok: true, files: files.slice(0, 200) };
+  // 以前の版で二重保存された記事は、新しい方だけ見せる
+  const seen = {};
+  const unique = files.filter(function (f) {
+    if (!f.source) return true;
+    if (seen[f.source]) return false;
+    seen[f.source] = true;
+    return true;
+  });
+  unique.forEach(function (f) { delete f.source; });
+  return { ok: true, files: unique.slice(0, 200) };
 }
 
 /** 中身を取得：Googleドキュメントは見出し・箇条書きを保ったブロックで返す */
@@ -194,4 +232,42 @@ function get_(id) {
     result.text = file.getBlob().getDataAsString('UTF-8');
   }
   return result;
+}
+
+// ---- 生成した音声の共有（別の端末で作り直さない） ----
+
+function audioFolder_() {
+  const props = PropertiesService.getScriptProperties();
+  const id = props.getProperty('AUDIO_FOLDER_ID');
+  if (id) {
+    try {
+      return DriveApp.getFolderById(id);
+    } catch (e) {
+      // 消されていたら作り直す
+    }
+  }
+  const parent = getFolder_();
+  const it = parent.getFoldersByName('音声キャッシュ');
+  const folder = it.hasNext() ? it.next() : parent.createFolder('音声キャッシュ');
+  props.setProperty('AUDIO_FOLDER_ID', folder.getId());
+  return folder;
+}
+
+function audioName_(key) {
+  if (!/^[0-9a-f]{64}$/.test(String(key || ''))) throw new Error('音声のキーが正しくありません');
+  return key + '.mp3';
+}
+
+function audioGet_(key) {
+  const it = audioFolder_().getFilesByName(audioName_(key));
+  if (!it.hasNext()) return { ok: true, found: false };
+  return { ok: true, found: true, data: Utilities.base64Encode(it.next().getBlob().getBytes()) };
+}
+
+function audioPut_(key, data) {
+  const name = audioName_(key);
+  const folder = audioFolder_();
+  if (folder.getFilesByName(name).hasNext()) return { ok: true, existed: true };
+  folder.createFile(Utilities.newBlob(Utilities.base64Decode(String(data || '')), 'audio/mpeg', name));
+  return { ok: true };
 }

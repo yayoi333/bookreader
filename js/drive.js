@@ -46,4 +46,6 @@ export const drive = {
     }),
   list: (q = '') => call('list', { q }),
   get: (id) => call('get', { id }),
+  audioGet: (key) => call('audioGet', { key }),
+  audioPut: (key, data) => call('audioPut', { key, data }),
 };

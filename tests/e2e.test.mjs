@@ -217,7 +217,7 @@ test('ブラウザでの取り込み・読み上げ・進捗・クラウド音�
       const req = ttsRequests[0];
       assert.equal(req.voice.name, 'ja-JP-Chirp3-HD-Aoede');
       assert.equal(req.audioConfig.audioEncoding, 'MP3');
-      assert.equal(req.input.text, 'はじめに。\n一つ目の文です。詳しくは を見てください。\n箇条書きの項目。\n最後の文です。');
+      assert.equal(req.input.text, 'はじめに。一つ目の文です。詳しくは を見てください。箇条書きの項目。最後の文です。');
       // 端末の声は使われていない
       assert.equal((await page.evaluate(() => window.__spoken)).length, 0);
       assert.equal(await page.textContent('#p-engine'), 'クラウド音声');
@@ -248,11 +248,12 @@ test('ブラウザでの取り込み・読み上げ・進捗・クラウド音�
       assert.ok(bytes[0] <= 1000, `最初のチャンク ${bytes[0]}`);
       assert.ok(bytes.every((b) => b < 5000));
       // 文章は欠けずにすべて送られている
-      assert.equal(sent.map((r) => r.input.text).join('').replace(/[。\n]/g, ''), ('長い記事' + long).replace(/。/g, ''));
+      assert.equal(sent.map((r) => r.input.text).join('').replace(/。/g, ''), ('長い記事' + long).replace(/。/g, ''));
     });
 
     await t.test('Drive連携：接続テスト・自動保存・Driveの文書を開く', async () => {
       const gasCalls = [];
+      const audioStore = new Map();
       await context.route('https://script.google.com/**', async (route) => {
         const body = JSON.parse(route.request().postData() || '{}');
         gasCalls.push(body);
@@ -262,6 +263,8 @@ test('ブラウザでの取り込み・読み上げ・進捗・クラウド音�
         if (body.action === 'save') return reply({ ok: true, id: 'file-1', url: 'https://docs.google.com/document/d/file-1/edit' });
         if (body.action === 'list') return reply({ ok: true, files: [{ id: 'memo-9', name: '自分のメモ', updated: 1760000000000 }] });
         if (body.action === 'get') return reply({ ok: true, title: '自分のメモ', url: 'https://docs.google.com/document/d/memo-9/edit', blocks: [{ type: 'h', text: '買い物' }, { type: 'li', text: '牛乳' }] });
+        if (body.action === 'audioPut') { audioStore.set(body.key, body.data); return reply({ ok: true }); }
+        if (body.action === 'audioGet') return reply(audioStore.has(body.key) ? { ok: true, found: true, data: audioStore.get(body.key) } : { ok: true, found: false });
         return reply({ ok: false, error: 'unknown' });
       });
       await page.goto(base + '#/settings');
@@ -291,6 +294,30 @@ test('ブラウザでの取り込み・読み上げ・進捗・クラウド音�
       await page.waitForSelector('.reader h1');
       assert.equal(await page.textContent('.reader h1'), '自分のメモ');
       assert.deepEqual(await page.$$eval('.seg', (els) => els.map((e) => e.textContent)), ['買い物', '牛乳']);
+    });
+
+    await t.test('クラウド音声をDriveで共有：別の端末（音声キャッシュ無し）でも生成し直さない', async () => {
+      // この端末で作った音声を再生すると Drive に送られる
+      await page.goto(base + '#/');
+      await page.waitForSelector('.doc-title');
+      await page.click('text=Xの長文記事テスト');
+      await page.waitForSelector('#read-btn');
+      await page.click('.seg[data-i="0"]');
+      await page.waitForFunction(() => document.querySelector('#p-pos').textContent === '読了', null, { timeout: 15000 });
+      await page.waitForTimeout(500);
+      const gasCallsBefore = ttsRequests.length;
+      // 別の端末を再現：端末内の音声キャッシュを消す
+      await page.goto(base + '#/settings');
+      await page.waitForSelector('#cache-clear');
+      await page.click('#cache-clear');
+      await page.waitForFunction(() => /削除しました/.test(document.querySelector('#toast').textContent));
+      await page.goto(base + '#/');
+      await page.waitForSelector('.doc-title');
+      await page.click('text=Xの長文記事テスト');
+      await page.waitForSelector('#read-btn');
+      await page.click('.seg[data-i="0"]');
+      await page.waitForFunction(() => document.querySelector('#p-pos').textContent === '読了', null, { timeout: 15000 });
+      assert.equal(ttsRequests.length, gasCallsBefore, 'Google TTS を呼ばずに Drive の音声で再生する');
     });
 
     await t.test('ブックマークレット：Web記事から本文だけを取り込む', async () => {
