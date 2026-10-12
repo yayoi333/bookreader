@@ -599,6 +599,45 @@ test('ブラウザでの取り込み・読み上げ・進捗・クラウド音�
       await article.close();
     });
 
+    await t.test('日付：元記事の公開日が取れればそれを本棚に出し、無ければ取り込んだ日', async () => {
+      const result = await page.evaluate(async (b) => {
+        const { docFromPageHtml } = await import(b + 'js/extract.js');
+        const dated = await (await fetch(b + 'tests/fixtures/dated-article.html')).text();
+        const undated = await (await fetch(b + 'tests/fixtures/article.html')).text();
+        return {
+          dated: docFromPageHtml(dated, 'https://example.com/dated').publishedAt,
+          undated: docFromPageHtml(undated, 'https://example.com/undated').publishedAt,
+        };
+      }, base);
+      assert.equal(result.dated, Date.parse('2026-08-03T14:32:06.000+09:00'), '検索エンジン向け情報欄の日付（time要素より優先）');
+      assert.equal(result.undated, null);
+      // ブックマークレットで日付のある記事を取り込み、本棚に元記事の日付が出る
+      await page.goto(base + '#/help');
+      await page.waitForSelector('#bm-code');
+      const code = decodeURIComponent((await page.textContent('#bm-code')).replace(/^javascript:/, ''));
+      const article = await context.newPage();
+      await article.goto(base + 'tests/fixtures/dated-article.html');
+      const [popup] = await Promise.all([context.waitForEvent('page'), article.evaluate(code)]);
+      await popup.waitForSelector('.reader h1', { timeout: 10000 });
+      assert.match(await popup.textContent('.reader-head .doc-meta'), /2026\/8\/3/);
+      await popup.goto(base + '#/');
+      await popup.click('[data-filter="all"]');
+      await popup.waitForSelector('.filter.active[data-filter="all"]');
+      const metas = await popup.$$eval('.doc-list li', (els) => els.map((e) => [e.querySelector('.doc-title').textContent, e.querySelector('.doc-meta').textContent]));
+      const dated = metas.find(([t]) => t === '日付のある記事');
+      assert.ok(dated && /2026\/8\/3/.test(dated[1]), JSON.stringify(metas));
+      // 日付の無いメモは取り込んだ日（今日）
+      const today = await popup.evaluate(() => { const d = new Date(); return `${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()}`; });
+      const memo = metas.find(([t]) => t === 'まとめ用の記事');
+      assert.ok(memo && memo[1].includes(today), JSON.stringify(memo) + ' / ' + today);
+      // Xの記事は投稿日時
+      const x = metas.find(([t]) => t === 'Xの長文記事テスト');
+      const xDate = await popup.evaluate(() => { const d = new Date(1760000000 * 1000); return `${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()}`; });
+      assert.ok(x && x[1].includes(xDate), JSON.stringify(x) + ' / ' + xDate);
+      await popup.close();
+      await article.close();
+    });
+
     assert.deepEqual(directTts, [], 'アプリから Google TTS を直接呼んでいない');
     assert.ok(gasCalls.every((c) => !('key' in c && /^AIza/.test(c.key))));
     assert.deepEqual(errors, []);

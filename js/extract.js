@@ -53,6 +53,55 @@ export function docFromText(text, title) {
   return { title: title || firstLine(text) || 'メモ', url: '', author: '', source: 'text', blocks };
 }
 
+/** 日時の文字列 → ミリ秒。おかしな値（1995年より前・未来）は使わない */
+function toTime(v) {
+  if (!v) return null;
+  const t = Date.parse(String(v).trim());
+  if (Number.isNaN(t) || t < Date.UTC(1995, 0, 1) || t > Date.now() + 86400000) return null;
+  return t;
+}
+
+function jsonLdDates(dom) {
+  const out = [];
+  const walk = (o) => {
+    if (!o || typeof o !== 'object') return;
+    if (Array.isArray(o)) return o.forEach(walk);
+    if (o.datePublished) out.push(o.datePublished);
+    if (o['@graph']) walk(o['@graph']);
+    if (o.mainEntity) walk(o.mainEntity);
+  };
+  dom.querySelectorAll('script[type="application/ld+json"]').forEach((s) => {
+    try {
+      walk(JSON.parse(s.textContent));
+    } catch {
+      // 壊れた JSON-LD は無視
+    }
+  });
+  return out;
+}
+
+/** 元記事の公開日時（ミリ秒）。見つからなければ null（そのときは取り込んだ日を使う） */
+export function publishedAtFromDom(dom, readabilityTime) {
+  const meta = (sel) => dom.querySelector(sel)?.getAttribute('content');
+  const candidates = [
+    readabilityTime,
+    ...jsonLdDates(dom),
+    meta('meta[property="article:published_time"]'),
+    meta('meta[name="article:published_time"]'),
+    meta('meta[itemprop="datePublished"]'),
+    meta('meta[name="pubdate"]'),
+    meta('meta[name="publishdate"]'),
+    meta('meta[name="date"]'),
+    meta('meta[name="parsely-pub-date"]'),
+    dom.querySelector('article time[datetime], main time[datetime], time[datetime]')?.getAttribute('datetime'),
+  ];
+  for (const c of candidates) {
+    const t = toTime(c);
+    if (t) return t;
+  }
+  return null;
+}
+
 /** ページのHTMLから本文だけを抜き出す（Mozilla Readability） */
 export function docFromPageHtml(html, url, { selection } = {}) {
   if (selection && selection.trim().length > 20) {
@@ -66,6 +115,8 @@ export function docFromPageHtml(html, url, { selection } = {}) {
     dom.head?.prepend(base);
   }
   const fallbackTitle = dom.title;
+  // Readability は DOM を書き換えるので、日付は先に探しておく（Readability の結果は後で優先する）
+  const pagePublishedAt = publishedAtFromDom(dom);
   let article = null;
   if (typeof window.Readability === 'function') {
     try {
@@ -91,6 +142,7 @@ export function docFromPageHtml(html, url, { selection } = {}) {
     url,
     author: article?.byline || article?.siteName || '',
     source: 'web',
+    publishedAt: toTime(article?.publishedTime) || pagePublishedAt,
     blocks,
   };
 }

@@ -11,7 +11,7 @@ const $ = (sel, root = document) => root.querySelector(sel);
 const view = $('#view');
 const player = new Player();
 const APP_URL = new URL('./', location.href).href;
-export const APP_VERSION = '0.5.0';
+export const APP_VERSION = '0.5.1';
 
 const esc = (s) =>
   String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
@@ -114,7 +114,7 @@ async function saveImported(doc, { forceDrive = false } = {}) {
   const existing = doc.url ? await docs.findBy('url', doc.url) : null;
   let saved;
   if (existing) {
-    saved = { ...existing, title: doc.title, author: doc.author, blocks: doc.blocks, updatedAt: Date.now() };
+    saved = { ...existing, title: doc.title, author: doc.author, blocks: doc.blocks, publishedAt: doc.publishedAt || existing.publishedAt || null, updatedAt: Date.now() };
     if (JSON.stringify(existing.blocks) !== JSON.stringify(doc.blocks)) {
       saved.progress = 0;
       delete saved.summary; // 本文が変わったので要約も作り直す
@@ -498,7 +498,8 @@ async function renderLibrary() {
 function docItem(d, selected = false) {
   const total = buildSegments(d.blocks).length || 1;
   const pct = Math.min(100, Math.round(((d.progress || 0) / total) * 100));
-  const meta = [SOURCE_LABEL[d.source] || '', d.author || hostOf(d.url), fmtDate(d.createdAt)].filter(Boolean).join(' · ');
+  // 元記事の日付が取れていればそれ、無ければ取り込んだ日
+  const meta = [SOURCE_LABEL[d.source] || '', d.author || hostOf(d.url), fmtDate(d.publishedAt || d.createdAt)].filter(Boolean).join(' · ');
   const st = statusOf(d);
   const stBtn = (k) =>
     `<button class="st-btn${st === k ? ' on' : ''}" data-status="${k}" data-id="${esc(d.id)}" aria-pressed="${st === k}">${STATUS_LABEL[k]}</button>`;
