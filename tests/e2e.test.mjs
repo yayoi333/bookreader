@@ -25,7 +25,8 @@ const TYPES = {
 function serve() {
   const server = http.createServer(async (req, res) => {
     const path = normalize(decodeURIComponent(new URL(req.url, 'http://x').pathname)).replace(/^(\.\.[/\\])+/, '');
-    const file = join(ROOT, path.endsWith('/') ? path + 'index.html' : path);
+    // normalize は Windows だと区切りを \ にするので、両方を見る
+    const file = join(ROOT, /[/\\]$/.test(path) ? path + 'index.html' : path);
     try {
       const body = await readFile(file);
       res.writeHead(200, { 'Content-Type': TYPES[extname(file)] || 'application/octet-stream' });

@@ -12,6 +12,10 @@
  *        プロパティ: TTS_API_KEY / 値: Google Cloud の APIキー
  *      を追加する。キーはここにだけ置き、アプリ（ブラウザ）には保存しない。
  *   6. （旧版「自分専用の図書館」の引っ越し）関数選択で「importOldLibrary」を選んで1回実行
+ *   7. （AI要約を使う場合）https://aistudio.google.com/apikey で Gemini の APIキーを作り、
+ *      スクリプト プロパティに GEMINI_API_KEY として追加。関数「testSummarize」を実行すると、
+ *      「よみあげ文庫」フォルダの最新の記事を要約して実行ログに出す。
+ *      モデルを変えたいときは GEMINI_MODEL も追加（無ければ gemini-3.5-flash-lite）。
  *
  * コードを書き換えたら「デプロイを管理」→ 編集 → バージョン「新バージョン」で更新（URLは変わらない）。
  */
@@ -57,6 +61,8 @@ function doPost(e) {
         return json_(tts_(req.voice, req.text));
       case 'voices':
         return json_(voices_());
+      case 'summarize':
+        return json_(summarize_(req.title, req.blocks));
       default:
         return json_({ ok: false, error: '不明な操作です: ' + req.action });
     }
@@ -395,4 +401,156 @@ function importOldLibrary() {
   });
   Logger.log('旧版の引っ越し: JSON ' + result.found + '件 → 保存 ' + result.saved + '件（本文なしで飛ばした ' + result.skipped + '件）');
   return result;
+}
+
+// ---- AI要約（Gemini API。APIキーはスクリプトプロパティ GEMINI_API_KEY にだけ置く） ----
+
+const GEMINI_API = 'https://generativelanguage.googleapis.com/v1beta/models/';
+const DEFAULT_GEMINI_MODEL = 'gemini-3.5-flash-lite'; // 2026-10-09 時点で無料枠あり・低コスト向けの安定版
+const SUMMARY_MAX_CHARS = 60000; // これより長い記事は先頭だけを要約する
+
+const SUMMARY_SCHEMA = {
+  type: 'OBJECT',
+  properties: {
+    tldr: { type: 'STRING' },
+    points: { type: 'ARRAY', items: { type: 'STRING' } },
+    terms: {
+      type: 'ARRAY',
+      items: { type: 'OBJECT', properties: { word: { type: 'STRING' }, note: { type: 'STRING' } }, required: ['word', 'note'] },
+    },
+    verdict: {
+      type: 'OBJECT',
+      properties: { level: { type: 'STRING', enum: ['高', '中', '低'] }, reason: { type: 'STRING' } },
+      required: ['level', 'reason'],
+    },
+  },
+  required: ['tldr', 'points', 'terms', 'verdict'],
+};
+
+function summaryPrompt_(title, text, truncated) {
+  return [
+    'あなたは、忙しい読者のために記事の「下読み」をする編集者です。次の記事を日本語で要約してください。',
+    '',
+    '出力はJSONだけ。形式:',
+    '{"tldr": "結論を1〜2文", "points": ["要点", ...3〜5個], "terms": [{"word": "難しい用語", "note": "ひとこと解説"}, ...0〜5個], "verdict": {"level": "高|中|低", "reason": "全文を読む価値の理由を1文"}}',
+    '',
+    'ルール:',
+    '- 記事に書かれていることだけを書く。推測や一般論を足さない',
+    '- 耳で聞いても分かる、短い話し言葉寄りの文にする（1文60字以内を目安）',
+    '- URL・絵文字・記号の羅列は入れない',
+    '- verdict は、要約だけで足りるなら「低」、全文に要約で拾えない具体例や手順が多いなら「高」',
+    truncated ? '- 記事が長いため先頭部分だけを渡しています。その範囲で要約してください' : null,
+    '',
+    'タイトル: ' + title,
+    '本文:',
+    text,
+  ].filter(function (l) { return l !== null; }).join('\n');
+}
+
+/** ブロック → 要約に渡す本文（見出しは「■」、箇条書きは「・」を付けて構造を残す） */
+function blocksToText_(blocks) {
+  return (blocks || []).map(function (b) {
+    const t = String((b && b.text) || '').trim();
+    if (!t) return '';
+    if (b.type === 'h') return '■ ' + t;
+    if (b.type === 'li') return '・' + t;
+    if (b.type === 'quote') return '「' + t + '」';
+    return t;
+  }).filter(String).join('\n');
+}
+
+/** Gemini の返事（JSON文字列。```json で囲まれていることもある）→ 要約。形が違えば例外 */
+function parseSummary_(raw) {
+  const text = String(raw || '').trim();
+  const start = text.indexOf('{');
+  const end = text.lastIndexOf('}');
+  if (start < 0 || end < start) throw new Error('要約の形式が読めません');
+  const j = JSON.parse(text.slice(start, end + 1));
+  const str = function (v) { return String(v == null ? '' : v).trim(); };
+  const level = str(j.verdict && j.verdict.level);
+  const out = {
+    tldr: str(j.tldr),
+    points: (Array.isArray(j.points) ? j.points : []).map(str).filter(String).slice(0, 7),
+    terms: (Array.isArray(j.terms) ? j.terms : [])
+      .map(function (t) { return { word: str(t && t.word), note: str(t && t.note) }; })
+      .filter(function (t) { return t.word && t.note; })
+      .slice(0, 8),
+    verdict: { level: ['高', '中', '低'].indexOf(level) >= 0 ? level : '中', reason: str(j.verdict && j.verdict.reason) },
+  };
+  if (!out.tldr || !out.points.length) throw new Error('要約の中身が空です');
+  return out;
+}
+
+function geminiCall_(model, key, prompt, useSchema) {
+  const generationConfig = { responseMimeType: 'application/json', temperature: 0.2 };
+  if (useSchema) generationConfig.responseSchema = SUMMARY_SCHEMA;
+  const res = UrlFetchApp.fetch(GEMINI_API + encodeURIComponent(model) + ':generateContent', {
+    method: 'post',
+    contentType: 'application/json',
+    headers: { 'x-goog-api-key': key },
+    muteHttpExceptions: true,
+    payload: JSON.stringify({ contents: [{ role: 'user', parts: [{ text: prompt }] }], generationConfig: generationConfig }),
+  });
+  let body = {};
+  try {
+    body = JSON.parse(res.getContentText() || '{}');
+  } catch (e) {
+    body = {};
+  }
+  return { code: res.getResponseCode(), body: body };
+}
+
+function summarize_(title, blocks) {
+  const props = PropertiesService.getScriptProperties();
+  const key = props.getProperty('GEMINI_API_KEY');
+  if (!key) return { ok: false, error: 'AI要約のAPIキーが未設定です（GASの「スクリプト プロパティ」に GEMINI_API_KEY を追加）' };
+  const model = props.getProperty('GEMINI_MODEL') || DEFAULT_GEMINI_MODEL;
+  title = String(title || '無題');
+  let text = blocksToText_(blocks);
+  if (!text) return { ok: false, error: '要約する本文がありません' };
+  const truncated = text.length > SUMMARY_MAX_CHARS;
+  if (truncated) text = text.slice(0, SUMMARY_MAX_CHARS);
+  const prompt = summaryPrompt_(title, text, truncated);
+
+  let r = geminiCall_(model, key, prompt, true);
+  // 出力の型指定に対応していないモデルなら、型指定なしでもう一度だけ試す
+  if (r.code === 400 && /schema|response_?mime/i.test(JSON.stringify(r.body))) {
+    r = geminiCall_(model, key, prompt, false);
+  }
+  if (r.code === 429) return { ok: false, error: 'summary_quota', message: 'AI要約の無料枠の上限に達しました。時間をおいて「要約する」を押してください' };
+  if (r.code >= 400) {
+    const m = (r.body.error && r.body.error.message) || '';
+    if (/API key not valid|API_KEY_INVALID/i.test(m)) return { ok: false, error: 'GEMINI_API_KEY が正しくありません' };
+    if (/not found|is not supported/i.test(m)) return { ok: false, error: 'モデル「' + model + '」が使えません（GEMINI_MODEL を確認）：' + m };
+    return { ok: false, error: 'AI要約に失敗しました（' + r.code + '）：' + m };
+  }
+  const cand = r.body.candidates && r.body.candidates[0];
+  const parts = (cand && cand.content && cand.content.parts) || [];
+  const raw = parts.map(function (p) { return p.text || ''; }).join('');
+  if (!raw) {
+    const reason = (cand && cand.finishReason) || (r.body.promptFeedback && r.body.promptFeedback.blockReason) || '不明';
+    return { ok: false, error: 'AI要約が空で返りました（理由: ' + reason + '）' };
+  }
+  let summary;
+  try {
+    summary = parseSummary_(raw);
+  } catch (e) {
+    return { ok: false, error: 'AI要約の形式が想定と違いました：' + e.message };
+  }
+  summary.model = model;
+  summary.truncated = truncated;
+  summary.at = Date.now();
+  return { ok: true, summary: summary };
+}
+
+/** GASエディタでの動作確認用：「よみあげ文庫」フォルダの最新の記事を要約してログに出す */
+function testSummarize() {
+  const files = list_('').files;
+  if (!files.length) throw new Error('「よみあげ文庫」フォルダに記事がありません');
+  const doc = get_(files[0].id);
+  const blocks = doc.blocks || String(doc.text || '').split(/\n+/).map(function (t) { return { type: 'p', text: t }; });
+  const res = summarize_(doc.title, blocks);
+  Logger.log('記事: ' + doc.title);
+  Logger.log(JSON.stringify(res, null, 2));
+  return res;
 }

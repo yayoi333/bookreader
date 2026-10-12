@@ -11,7 +11,7 @@ const iter = (arr) => {
   return { hasNext: () => i < arr.length, next: () => arr[i++] };
 };
 
-function fakeGas({ startWithEmptyParagraph = true, fetchImpl = null, oldFiles = null, ttsKey = 'KEY123' } = {}) {
+function fakeGas({ startWithEmptyParagraph = true, fetchImpl = null, oldFiles = null, ttsKey = 'KEY123', geminiKey = null, geminiModel = null } = {}) {
   const docs = new Map(); // id -> { name, children }
   const files = new Map(); // id -> file
   let seq = 0;
@@ -81,7 +81,12 @@ function fakeGas({ startWithEmptyParagraph = true, fetchImpl = null, oldFiles = 
     getUrl: () => `https://docs.google.com/document/d/${id}/edit`,
   });
 
-  const props = { FOLDER_ID: 'main-folder', ...(ttsKey ? { TTS_API_KEY: ttsKey } : {}) };
+  const props = {
+    FOLDER_ID: 'main-folder', TOKEN: 'TOKEN1',
+    ...(ttsKey ? { TTS_API_KEY: ttsKey } : {}),
+    ...(geminiKey ? { GEMINI_API_KEY: geminiKey } : {}),
+    ...(geminiModel ? { GEMINI_MODEL: geminiModel } : {}),
+  };
   const fetched = [];
   const ctx = {
     DocumentApp: {
@@ -110,6 +115,10 @@ function fakeGas({ startWithEmptyParagraph = true, fetchImpl = null, oldFiles = 
       },
     },
     Logger: { log: () => {} },
+    ContentService: {
+      MimeType: { JSON: 'json' },
+      createTextOutput: (text) => ({ text, setMimeType() { return this; } }),
+    },
     PropertiesService: { getScriptProperties: () => ({ getProperty: (k) => props[k] ?? null, setProperty: (k, v) => (props[k] = v) }) },
     MimeType: { GOOGLE_DOCS: 'gdoc', PLAIN_TEXT: 'text/plain' },
     Utilities: {
@@ -259,4 +268,99 @@ test('旧版の引っ越し: 2回実行しても同じ記事は増えない', ()
 test('旧版の引っ越し: 旧フォルダが無ければ分かるエラーにする', () => {
   const { run } = fakeGas();
   assert.throws(() => run('importOldLibrary()'), /自分専用の図書館/);
+});
+
+// ---- AI要約（Gemini） ----
+
+const SUMMARY = {
+  tldr: '結論の一文です。',
+  points: ['要点1', '要点2', '要点3'],
+  terms: [{ word: 'GAS', note: 'Googleのスクリプト' }],
+  verdict: { level: '高', reason: '手順が多いため' },
+};
+const gemini = (obj, code = 200) => () => ({ code, body: obj });
+const geminiText = (text) => gemini({ candidates: [{ content: { parts: [{ text }] }, finishReason: 'STOP' }] });
+const BLOCKS = [{ type: 'h', text: '見出し' }, { type: 'p', text: '本文です。' }, { type: 'li', text: '項目' }];
+const summarizeExpr = (blocks = BLOCKS) => `summarize_('記事タイトル', ${JSON.stringify(blocks)})`;
+
+test('要約: スクリプトプロパティのキーとモデルでGeminiを呼び、要約を返す', () => {
+  const { run, fetched } = fakeGas({ geminiKey: 'GKEY', fetchImpl: geminiText(JSON.stringify(SUMMARY)) });
+  const res = run(summarizeExpr());
+  assert.equal(res.ok, true);
+  assert.deepEqual({ ...res.summary, at: 0 }, { ...SUMMARY, model: 'gemini-3.5-flash-lite', truncated: false, at: 0 });
+  assert.match(fetched[0].url, /models\/gemini-3\.5-flash-lite:generateContent$/);
+  assert.equal(fetched[0].opt.headers['x-goog-api-key'], 'GKEY');
+  assert.ok(!fetched[0].url.includes('GKEY'), 'キーをURLに入れない');
+  const sent = JSON.parse(fetched[0].opt.payload);
+  assert.equal(sent.generationConfig.responseMimeType, 'application/json');
+  assert.ok(sent.generationConfig.responseSchema);
+  const prompt = sent.contents[0].parts[0].text;
+  assert.match(prompt, /タイトル: 記事タイトル/);
+  assert.match(prompt, /■ 見出し\n本文です。\n・項目/);
+  assert.ok(!JSON.stringify(res).includes('GKEY'));
+});
+
+test('要約: GEMINI_MODEL を設定すればそのモデルを使う', () => {
+  const { run, fetched } = fakeGas({ geminiKey: 'GKEY', geminiModel: 'gemini-3.8-flash', fetchImpl: geminiText(JSON.stringify(SUMMARY)) });
+  assert.equal(run(summarizeExpr()).summary.model, 'gemini-3.8-flash');
+  assert.match(fetched[0].url, /models\/gemini-3\.8-flash:generateContent$/);
+});
+
+test('要約: 型指定を断られたら、型指定なしで1回だけ再試行する。```json 囲みも読める', () => {
+  let n = 0;
+  const { run, fetched } = fakeGas({
+    geminiKey: 'GKEY',
+    fetchImpl: () => (++n === 1
+      ? { code: 400, body: { error: { message: 'responseSchema is not supported for this model' } } }
+      : { code: 200, body: { candidates: [{ content: { parts: [{ text: '```json\n' + JSON.stringify(SUMMARY) + '\n```' }] } }] } }),
+  });
+  const res = run(summarizeExpr());
+  assert.equal(res.ok, true);
+  assert.equal(fetched.length, 2);
+  assert.ok(!JSON.parse(fetched[1].opt.payload).generationConfig.responseSchema);
+});
+
+test('要約: 無料枠切れ(429)は summary_quota として分かる', () => {
+  const { run } = fakeGas({ geminiKey: 'GKEY', fetchImpl: gemini({ error: { message: 'quota' } }, 429) });
+  const res = run(summarizeExpr());
+  assert.equal(res.ok, false);
+  assert.equal(res.error, 'summary_quota');
+  assert.match(res.message, /無料枠/);
+});
+
+test('要約: キー未設定・本文なし・形式崩れは例外でなくエラーを返す（記事の保存は止めない）', () => {
+  assert.match(fakeGas().run(summarizeExpr()).error, /GEMINI_API_KEY/);
+  const g = fakeGas({ geminiKey: 'GKEY', fetchImpl: geminiText('ごめんなさい、要約できません') });
+  assert.match(g.run(summarizeExpr([])).error, /本文がありません/);
+  assert.match(g.run(summarizeExpr()).error, /形式/);
+  const empty = fakeGas({ geminiKey: 'GKEY', fetchImpl: gemini({ candidates: [{ finishReason: 'SAFETY' }] }) });
+  assert.match(empty.run(summarizeExpr()).error, /SAFETY/);
+});
+
+test('要約: 欠けた・余計な項目は整える（評価が想定外なら「中」）', () => {
+  const messy = { tldr: ' 結論 ', points: ['a', '', 'b'], terms: [{ word: 'x' }, { word: 'y', note: 'z' }], verdict: { level: 'すごく高い' } };
+  const { run } = fakeGas({ geminiKey: 'GKEY', fetchImpl: geminiText(JSON.stringify(messy)) });
+  const s = run(summarizeExpr()).summary;
+  assert.equal(s.tldr, '結論');
+  assert.deepEqual(s.points, ['a', 'b']);
+  assert.deepEqual(s.terms, [{ word: 'y', note: 'z' }]);
+  assert.deepEqual(s.verdict, { level: '中', reason: '' });
+});
+
+test('要約: 長すぎる記事は先頭だけを渡し、truncated を付ける', () => {
+  const { run, fetched } = fakeGas({ geminiKey: 'GKEY', fetchImpl: geminiText(JSON.stringify(SUMMARY)) });
+  const res = run(summarizeExpr([{ type: 'p', text: 'あ'.repeat(70000) }]));
+  assert.equal(res.summary.truncated, true);
+  const prompt = JSON.parse(fetched[0].opt.payload).contents[0].parts[0].text;
+  assert.ok(prompt.length < 62000);
+  assert.match(prompt, /先頭部分だけ/);
+});
+
+test('doPost: summarize 操作が使える（トークン必須）', () => {
+  const { run } = fakeGas({ geminiKey: 'GKEY', fetchImpl: geminiText(JSON.stringify(SUMMARY)) });
+  const post = (body) => `JSON.parse(doPost({ postData: { contents: ${JSON.stringify(JSON.stringify(body))} } }).text)`;
+  assert.equal(run(post({ token: 'nope', action: 'summarize', title: 't', blocks: BLOCKS })).error, 'unauthorized');
+  const ok = run(post({ token: 'TOKEN1', action: 'summarize', title: 't', blocks: BLOCKS }));
+  assert.equal(ok.ok, true);
+  assert.equal(ok.summary.tldr, SUMMARY.tldr);
 });

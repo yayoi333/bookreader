@@ -47,9 +47,11 @@ Xのポスト・X記事、Web記事、Google Driveのメモを **本文だけ** 
    - 旧版（v0.1.x）でアプリに貼っていたAPIキーは、v0.2.0 を開いたときに端末から自動で消えます
 3. **旧版「自分専用の図書館」の引っ越し**（同じGoogleアカウントのDriveにある場合）：GASエディタで `importOldLibrary` を1回実行。
    旧フォルダの .json を読み、同じ記事は新しい保存だけを「よみあげ文庫」へGoogleドキュメントで保存（旧フォルダは変更しない。画像・動画・旧版のハイライトと読書位置は移らない）
-4. **iPhone**：ショートカットAppで「共有シートに表示」するショートカットを作る（URLエンコード → `アプリURL?q=` に連結 → URLを開く）
-5. **Android**：Chromeで開いて「ホーム画面に追加」→ Xアプリの共有メニューに出てくる
-6. **PC**：Tampermonkey に `userscript/yomiage-x.user.js` を入れると、Xのポスト/記事に ▶ が付く
+4. **AI要約**（フェーズ1。今はGASだけ。アプリの画面にはまだ出ない）：[Google AI Studio](https://aistudio.google.com/apikey) でAPIキーを作り、GASのスクリプト プロパティに `GEMINI_API_KEY` として追加 → 関数 `testSummarize` を実行するとログに要約が出る。
+   無料枠では送った記事の内容がGoogleの製品改善に使われます
+5. **iPhone**：ショートカットAppで「共有シートに表示」するショートカットを作る（URLエンコード → `アプリURL?q=` に連結 → URLを開く）
+6. **Android**：Chromeで開いて「ホーム画面に追加」→ Xアプリの共有メニューに出てくる
+7. **PC**：Tampermonkey に `userscript/yomiage-x.user.js` を入れると、Xのポスト/記事に ▶ が付く
 
 ## 仕組み
 
