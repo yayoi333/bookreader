@@ -202,3 +202,18 @@ code.clip { max-height: 4.5em; overflow: hidden; }
 @media (max-width: 480px) { .summary-box dl { grid-template-columns: 1fr; } .summary-box dd { margin-bottom: 4px; } }
 .queue-btn { margin: 0 0 12px; }
 .summary-box .primary.small svg { width: 16px; height: 16px; }
+
+/* 状態（未読／あとで／読了） */
+.filters { display: flex; gap: 6px; flex-wrap: wrap; margin: 0 0 10px; }
+.filter { min-height: 34px; padding: 4px 12px; font-size: 14px; background: transparent; color: var(--ink); }
+.filter .count { color: var(--ink-soft); }
+.filter.active { background: var(--ink); border-color: var(--ink); color: var(--paper); font-weight: 600; }
+.filter.active .count { color: var(--paper); opacity: .8; }
+.doc-item { padding-bottom: 40px; }
+.doc-actions { position: absolute; right: 8px; bottom: 16px; display: flex; gap: 6px; z-index: 1; }
+.st-btn { min-height: 28px; padding: 2px 10px; font-size: 12px; background: var(--paper); color: var(--ink-soft); }
+.st-btn.on { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); font-weight: 600; }
+#status-later.on { border-color: var(--accent); color: var(--accent); }
+.doc-list li.kb-selected .doc-item { outline: 2px solid var(--accent); outline-offset: 1px; }
+.kb-hint { display: none; text-align: center; }
+@media (hover: hover) and (pointer: fine) { .kb-hint { display: block; } }

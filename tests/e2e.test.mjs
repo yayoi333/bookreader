@@ -468,6 +468,97 @@ test('ブラウザでの取り込み・読み上げ・進捗・クラウド音�
       assert.ok(spoken.indexOf(`1本目。${unreadTitles[0]}`) >= 0, `${unreadTitles[0]} / ${spoken.slice(0, 80)}`);
     });
 
+    const statusesInDb = () => page.evaluate(async () => {
+      const db = await new Promise((r) => { const q = indexedDB.open('yomiage'); q.onsuccess = () => r(q.result); });
+      const all = await new Promise((r) => { const q = db.transaction('docs').objectStore('docs').getAll(); q.onsuccess = () => r(q.result); });
+      return Object.fromEntries(all.map((d) => [d.title, d.status || null]));
+    });
+    const countOf = async (f) => Number(await page.textContent(`[data-filter="${f}"] .count`));
+
+    await t.test('状態：本棚を未読／あとで／読了で絞り込める。ボタンで状態を変えられる', async () => {
+      for (const title of ['キー操作の記事1', 'キー操作の記事2', 'キー操作の記事3']) {
+        await page.goto(base + '#/');
+        await page.waitForSelector('#import-input');
+        await page.fill('#import-input', `${title}\n\n${title}の本文です。`);
+        await page.click('#import-btn');
+        await page.waitForSelector('.reader h1');
+      }
+      await page.goto(base + '#/');
+      await page.waitForSelector('.filters');
+      const total = await countOf('all');
+      assert.equal((await countOf('unread')) + (await countOf('later')) + (await countOf('done')), total);
+      // 本文を聴き終えた記事は自動で読了
+      assert.equal((await statusesInDb())['要約テスト記事'], 'done');
+      // 「あとで」ボタン
+      await page.click('[data-doc] [data-status="later"]');
+      await page.waitForSelector('[data-doc] [data-status="later"][aria-pressed="true"]');
+      await page.click('[data-filter="later"]');
+      await page.waitForSelector('.filter.active[data-filter="later"]');
+      const laterItems = await page.$$eval('.doc-list li', (els) => els.map((e) => e.dataset.statusNow));
+      assert.deepEqual(laterItems, ['later']);
+      // 読了だけ
+      await page.click('[data-filter="done"]');
+      await page.waitForSelector('.filter.active[data-filter="done"]');
+      const doneItems = await page.$$eval('.doc-list li', (els) => els.map((e) => e.dataset.statusNow));
+      assert.ok(doneItems.length >= 1 && doneItems.every((x) => x === 'done'), JSON.stringify(doneItems));
+      // 絞り込みは開き直しても覚えている
+      await page.reload();
+      await page.waitForSelector('.filter.active[data-filter="done"]');
+    });
+
+    await t.test('キー操作：本棚で J と E だけを押して、未読3件を読了にできる', async () => {
+      await page.click('[data-filter="unread"]');
+      await page.waitForSelector('.filter.active[data-filter="unread"]');
+      const before = await countOf('unread');
+      const firstThree = await page.$$eval('.doc-list li .doc-title', (els) => els.slice(0, 3).map((e) => e.textContent));
+      await page.click('.section-title'); // 入力欄から外す
+      await page.keyboard.press('j');
+      await page.waitForSelector('.doc-list li.kb-selected');
+      for (let i = 0; i < 3; i++) {
+        await page.keyboard.press('e');
+        await page.waitForFunction((n) => Number(document.querySelector('[data-filter="unread"] .count').textContent) === n, before - i - 1);
+      }
+      const st = await statusesInDb();
+      for (const title of firstThree) assert.equal(st[title], 'done', title);
+      assert.equal(await countOf('unread'), before - 3);
+      // まとめて聴くは未読だけ（読了にした記事は入らない）
+      const label = (await page.textContent('#queue-play').catch(() => '')) || '';
+      const n = Number((label.match(/（(\d+)本）/) || [0, 0])[1]);
+      assert.ok(n <= before - 3, label);
+    });
+
+    await t.test('キー操作：記事画面で E を押すと読了になり、次の記事へ。K で前、Esc で本棚', async () => {
+      await page.click('[data-filter="all"]');
+      await page.waitForSelector('.filter.active[data-filter="all"]');
+      const titles = await page.$$eval('.doc-list li .doc-title', (els) => els.map((e) => e.textContent));
+      await page.click('.doc-list li .doc-item');
+      await page.waitForSelector('.reader h1');
+      assert.equal(await page.textContent('.reader h1'), titles[0]);
+      await page.keyboard.press('j');
+      await page.waitForFunction((t) => document.querySelector('.reader h1')?.textContent === t, titles[1]);
+      await page.keyboard.press('k');
+      await page.waitForFunction((t) => document.querySelector('.reader h1')?.textContent === t, titles[0]);
+      // 前のテストで読了／あとでになっていたら、ボタンで未読に戻してから試す
+      for (const btn of ['#status-done', '#status-later']) {
+        if ((await page.getAttribute(btn, 'aria-pressed')) === 'true') {
+          await page.click(btn);
+          await page.waitForSelector(`${btn}[aria-pressed="false"]`);
+        }
+      }
+      await page.click('.reader h1'); // ボタンからフォーカスを外す
+      assert.equal((await statusesInDb())[titles[0]], 'unread');
+      await page.keyboard.press('e');
+      await page.waitForFunction((t) => document.querySelector('.reader h1')?.textContent === t, titles[1]);
+      assert.equal((await statusesInDb())[titles[0]], 'done');
+      await page.keyboard.press('Escape');
+      await page.waitForSelector('.filters');
+      // 入力欄で文字を打っても反応しない
+      await page.click('#import-input');
+      await page.keyboard.type('je');
+      assert.equal(await page.inputValue('#import-input'), 'je');
+      await page.fill('#import-input', '');
+    });
+
     await t.test('クラウド音声をDriveで共有：別の端末（音声キャッシュ無し）でも生成し直さない', async () => {
       // この端末で作った音声を再生すると Drive に送られる
       await page.goto(base + '#/');

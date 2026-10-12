@@ -11,7 +11,7 @@ const $ = (sel, root = document) => root.querySelector(sel);
 const view = $('#view');
 const player = new Player();
 const APP_URL = new URL('./', location.href).href;
-export const APP_VERSION = '0.4.0';
+export const APP_VERSION = '0.5.0';
 
 const esc = (s) =>
   String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
@@ -200,9 +200,34 @@ function summaryListenDoc(doc) {
   };
 }
 
-/** 未読（本文を聴き終えていない）で要約のある記事。新しい順 */
+// ---------------------------------------------------------------- 状態（未読／あとで／読了）
+
+const STATUS_LABEL = { unread: '未読', later: 'あとで', done: '読了' };
+const FILTERS = ['unread', 'later', 'done', 'all'];
+
+/** 状態が未設定の古い記事は、本文を聴き終えていれば読了、それ以外は未読として扱う */
+function statusOf(d) {
+  if (d.status) return d.status;
+  const total = buildSegments(d.blocks).length;
+  return total > 0 && (d.progress || 0) >= total ? 'done' : 'unread';
+}
+
+function libraryFilter() {
+  const f = getSettings().libraryFilter;
+  return FILTERS.includes(f) ? f : 'all';
+}
+
+function applyFilter(list, filter = libraryFilter()) {
+  return filter === 'all' ? list : list.filter((d) => statusOf(d) === filter);
+}
+
+async function setStatus(id, status) {
+  await docs.update(id, (d) => ({ ...d, status, statusAt: Date.now() }));
+}
+
+/** 未読で要約のある記事。新しい順 */
 function unreadSummarized(list) {
-  return list.filter((d) => d.summary && (d.progress || 0) < buildSegments(d.blocks).length);
+  return list.filter((d) => d.summary && statusOf(d) === 'unread');
 }
 
 /** 未読の要約をつなげた仮の記事。1本ごとにタイトルを読んでから要約へ */
@@ -373,8 +398,15 @@ async function handleIncoming() {
 
 // ---------------------------------------------------------------- 画面：本棚
 
+let kbIndex = -1; // キー操作で選んでいる記事（本棚の何番目か）
+
 async function renderLibrary() {
-  const list = await docs.all();
+  const all = await docs.all();
+  const filter = libraryFilter();
+  const list = applyFilter(all, filter);
+  const counts = { all: all.length };
+  for (const k of ['unread', 'later', 'done']) counts[k] = all.filter((d) => statusOf(d) === k).length;
+  if (kbIndex >= list.length) kbIndex = list.length - 1;
   view.innerHTML = `${installBoxHtml()}
     <section class="card import">
       <label for="import-input" class="label">XのURL・記事のURL・テキストを貼り付け</label>
@@ -385,28 +417,53 @@ async function renderLibrary() {
       </div>
     </section>
     <section>
-      <h2 class="section-title">本棚 <span class="count">${list.length}</span></h2>
+      <h2 class="section-title">本棚 <span class="count">${all.length}</span></h2>
       ${
-        unreadSummarized(list).length
-          ? `<button id="queue-play" class="primary queue-btn">${ICONS.play}<span>未読の要約をまとめて聴く（${Math.min(20, unreadSummarized(list).length)}本）</span></button>`
+        unreadSummarized(all).length
+          ? `<button id="queue-play" class="primary queue-btn">${ICONS.play}<span>未読の要約をまとめて聴く（${Math.min(20, unreadSummarized(all).length)}本）</span></button>`
           : ''
       }
+      <div class="filters" role="tablist" aria-label="本棚の絞り込み">${FILTERS.map(
+        (f) => `<button role="tab" class="filter${f === filter ? ' active' : ''}" data-filter="${f}" aria-selected="${f === filter}">
+          ${f === 'all' ? 'すべて' : STATUS_LABEL[f]} <span class="count">${counts[f]}</span></button>`,
+      ).join('')}</div>
       ${
         list.length
-          ? `<ul class="doc-list">${list.map(docItem).join('')}</ul>`
-          : `<p class="empty">まだ何もありません。上の欄にXの記事やWeb記事のURLを貼るか、
+          ? `<ul class="doc-list">${list.map((d, i) => docItem(d, i === kbIndex)).join('')}</ul>`
+          : all.length
+            ? `<p class="empty">「${filter === 'all' ? 'すべて' : STATUS_LABEL[filter]}」の記事はありません。</p>`
+            : `<p class="empty">まだ何もありません。上の欄にXの記事やWeb記事のURLを貼るか、
              <a href="#/help">使い方</a>のショートカット／ブックマークレットで送ってください。</p>`
       }
+      <p class="hint kb-hint">キー操作：J／K 次・前　E 読了　L あとで　Enter 開く　Space 再生・一時停止</p>
     </section>`;
   refreshInstallUi();
   const queueBtn = $('#queue-play');
   if (queueBtn) {
     queueBtn.onclick = () => {
       // iOS の再生許可のため、クリック処理の中で同期的に load → play（一覧は描画時のもの）
-      player.load(summaryQueueDoc(list));
+      player.load(summaryQueueDoc(all));
       player.play(0);
     };
   }
+  view.querySelectorAll('[data-filter]').forEach((b) => {
+    b.onclick = () => {
+      saveSettings({ libraryFilter: b.dataset.filter });
+      kbIndex = -1;
+      renderLibrary();
+    };
+  });
+  view.querySelectorAll('[data-status]').forEach((b) => {
+    b.onclick = async (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const doc = await docs.get(b.dataset.id);
+      if (!doc) return;
+      const next = statusOf(doc) === b.dataset.status ? 'unread' : b.dataset.status;
+      await setStatus(doc.id, next);
+      renderLibrary();
+    };
+  });
   $('#import-btn').onclick = () => {
     const v = $('#import-input').value;
     if (v.trim()) importAndOpen(v);
@@ -438,12 +495,16 @@ async function renderLibrary() {
   });
 }
 
-function docItem(d) {
+function docItem(d, selected = false) {
   const total = buildSegments(d.blocks).length || 1;
   const pct = Math.min(100, Math.round(((d.progress || 0) / total) * 100));
   const meta = [SOURCE_LABEL[d.source] || '', d.author || hostOf(d.url), fmtDate(d.createdAt)].filter(Boolean).join(' · ');
+  const st = statusOf(d);
+  const stBtn = (k) =>
+    `<button class="st-btn${st === k ? ' on' : ''}" data-status="${k}" data-id="${esc(d.id)}" aria-pressed="${st === k}">${STATUS_LABEL[k]}</button>`;
   return `
-    <li>
+    <li class="${selected ? 'kb-selected' : ''}" data-doc="${esc(d.id)}" data-status-now="${st}">
+      <div class="doc-actions">${stBtn('later')}${stBtn('done')}</div>
       <a class="doc-item" href="#/doc/${esc(d.id)}">
         <span class="doc-title">${esc(d.title)}</span>
         ${summaryLineHtml(d)}
@@ -498,6 +559,8 @@ async function renderReader(id) {
         <h1>${esc(doc.title)}</h1>
         <p class="doc-meta">${meta}${doc.url ? ` · <a href="${esc(doc.url)}" target="_blank" rel="noopener">元のページ</a>` : ''}</p>
         <div class="row">
+          <button id="status-done" class="ghost" aria-pressed="${statusOf(doc) === 'done'}">${statusOf(doc) === 'done' ? '未読に戻す' : '読了にする'}</button>
+          <button id="status-later" class="ghost${statusOf(doc) === 'later' ? ' on' : ''}" aria-pressed="${statusOf(doc) === 'later'}">${statusOf(doc) === 'later' ? 'あとでを外す' : 'あとで'}</button>
           <button id="read-btn" class="primary">${ICONS.play}<span>${bodyIndex > 0 && !bodyFinished ? '続きから聞く' : '最初から聞く'}</span></button>
           ${
             doc.driveFileId
@@ -514,6 +577,14 @@ async function renderReader(id) {
     player.play(player.finished ? 0 : player.index);
   };
   bindSummaryBox(doc.id);
+  $('#status-done').onclick = async () => {
+    await setStatus(doc.id, statusOf((await docs.get(doc.id)) || doc) === 'done' ? 'unread' : 'done');
+    refreshReaderStatus(doc.id);
+  };
+  $('#status-later').onclick = async () => {
+    await setStatus(doc.id, statusOf((await docs.get(doc.id)) || doc) === 'later' ? 'unread' : 'later');
+    refreshReaderStatus(doc.id);
+  };
   const driveBtn = $('#drive-btn');
   if (driveBtn) {
     driveBtn.onclick = () => {
@@ -537,6 +608,102 @@ async function renderReader(id) {
   };
   highlight(true);
   updatePlayerBar();
+}
+
+async function refreshReaderStatus(id) {
+  const doc = await docs.get(id);
+  const done = $('#status-done');
+  const later = $('#status-later');
+  if (!doc || !done || !later) return;
+  const st = statusOf(doc);
+  done.textContent = st === 'done' ? '未読に戻す' : '読了にする';
+  done.setAttribute('aria-pressed', String(st === 'done'));
+  later.textContent = st === 'later' ? 'あとでを外す' : 'あとで';
+  later.setAttribute('aria-pressed', String(st === 'later'));
+  later.classList.toggle('on', st === 'later');
+  toast(`「${STATUS_LABEL[st]}」にしました`, 1600);
+}
+
+// ---------------------------------------------------------------- キー操作（PC）
+
+function isTyping(el) {
+  return el && (el.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName));
+}
+
+/** 記事画面で J/K/E を押したときに移る先（本棚の絞り込みの並び。開いている記事が含まれなければ先頭から） */
+async function neighborDoc(currentId, step) {
+  const list = applyFilter(await docs.all());
+  if (!list.length) return null;
+  const i = list.findIndex((d) => d.id === currentId);
+  if (i < 0) return step > 0 ? list[0] : list[list.length - 1];
+  return list[i + step] || null;
+}
+
+function selectLibraryItem(i) {
+  const items = [...view.querySelectorAll('.doc-list li')];
+  if (!items.length) return;
+  kbIndex = Math.max(0, Math.min(items.length - 1, i));
+  items.forEach((li, j) => li.classList.toggle('kb-selected', j === kbIndex));
+  items[kbIndex].scrollIntoView({ block: 'nearest' });
+}
+
+async function onKey(e) {
+  if (e.ctrlKey || e.metaKey || e.altKey || isTyping(e.target)) return;
+  const key = e.key.length === 1 ? e.key.toLowerCase() : e.key;
+  const hash = location.hash || '#/';
+  const inReader = hash.startsWith('#/doc/');
+  const inLibrary = hash === '#/' || hash === '#';
+  if (key === ' ') {
+    if (!player.doc) return;
+    e.preventDefault();
+    player.toggle();
+    return;
+  }
+  if (inLibrary) {
+    const items = [...view.querySelectorAll('.doc-list li')];
+    if (!items.length) return;
+    const cur = items[kbIndex];
+    if (key === 'j') selectLibraryItem(kbIndex + 1);
+    else if (key === 'k') selectLibraryItem(kbIndex < 0 ? 0 : kbIndex - 1);
+    else if ((key === 'Enter' || key === 'o') && cur) location.hash = `#/doc/${cur.dataset.doc}`;
+    else if ((key === 'e' || key === 'l') && cur) {
+      const target = key === 'e' ? 'done' : 'later';
+      await setStatus(cur.dataset.doc, cur.dataset.statusNow === target ? 'unread' : target);
+      await renderLibrary();
+      selectLibraryItem(Math.min(kbIndex, view.querySelectorAll('.doc-list li').length - 1));
+    } else return;
+    e.preventDefault();
+    return;
+  }
+  if (inReader) {
+    const id = decodeURIComponent(hash.slice('#/doc/'.length));
+    if (key === 'j' || key === 'k') {
+      const next = await neighborDoc(id, key === 'j' ? 1 : -1);
+      if (next) location.hash = `#/doc/${next.id}`;
+      else toast(key === 'j' ? 'これが最後の記事です' : 'これが最初の記事です', 1600);
+    } else if (key === 'e') {
+      const doc = await docs.get(id);
+      if (!doc) return;
+      if (statusOf(doc) === 'done') {
+        await setStatus(id, 'unread');
+        refreshReaderStatus(id);
+      } else {
+        const next = await neighborDoc(id, 1); // 読了にする前の並びで次を決める
+        await setStatus(id, 'done');
+        toast('読了にしました', 1600);
+        if (next && next.id !== id) location.hash = `#/doc/${next.id}`;
+        else location.hash = '#/';
+      }
+    } else if (key === 'l') {
+      const doc = await docs.get(id);
+      if (!doc) return;
+      await setStatus(id, statusOf(doc) === 'later' ? 'unread' : 'later');
+      refreshReaderStatus(id);
+    } else if (key === 'Escape') {
+      location.hash = '#/';
+    } else return;
+    e.preventDefault();
+  }
 }
 
 let lastHighlighted = null;
@@ -578,7 +745,11 @@ function setupPlayerBar() {
   player.addEventListener('rate', () => (rateSel.value = String(getSettings().rate)));
   player.addEventListener('error', (e) => toast(e.detail, 6000));
   player.addEventListener('notice', (e) => toast(e.detail, 5000));
-  player.addEventListener('ended', () => toast('最後まで読みました'));
+  player.addEventListener('ended', () => {
+    toast('最後まで読みました');
+    // 本文を聴き終えたら読了に（要約・まとめて聴くは除く）
+    if (player.doc && !player.doc.kind) setStatus(player.doc.id, 'done').catch(() => {});
+  });
 }
 
 function updatePlayerBar() {
@@ -927,6 +1098,9 @@ async function init() {
   applyFontSize();
   setupPlayerBar();
   window.addEventListener('hashchange', route);
+  document.addEventListener('keydown', (e) => {
+    onKey(e).catch(() => {});
+  });
   await route();
   await handleIncoming();
   // 前回聞いていた文書を再生バーに出しておく
