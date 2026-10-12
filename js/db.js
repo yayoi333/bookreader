@@ -49,13 +49,31 @@ export const docs = {
     if (!value) return null;
     return (await docs.all()).find((d) => d[field] === value) || null;
   },
+  /** 1回の読み書きの中で、最新の記事を受け取って書き換える（同時に走る保存どうしで上書きし合わない）。
+   *  fn が null/undefined を返したら何もしない。並び順(updatedAt)は fn が変えない限りそのまま */
+  async update(id, fn) {
+    const db = await open();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction('docs', 'readwrite');
+      const store = tx.objectStore('docs');
+      let result = null;
+      const req = store.get(id);
+      req.onsuccess = () => {
+        if (!req.result) return;
+        const next = fn(req.result);
+        if (next) {
+          store.put(next);
+          result = next;
+        }
+      };
+      tx.oncomplete = () => resolve(result);
+      tx.onerror = () => reject(tx.error);
+      tx.onabort = () => reject(tx.error);
+    });
+  },
   /** 進み具合だけ更新（並び順は変えない） */
   async setProgress(id, progress) {
-    const doc = await docs.get(id);
-    if (!doc) return;
-    doc.progress = progress;
-    doc.readAt = Date.now();
-    await run('docs', 'readwrite', (s) => s.put(doc));
+    await docs.update(id, (doc) => ({ ...doc, progress, readAt: Date.now() }));
   },
 };
 

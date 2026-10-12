@@ -112,6 +112,8 @@ test('ブラウザでの取り込み・読み上げ・進捗・クラウド音�
   );
   // 自分の GAS（Drive連携・クラウド音声の代理生成）の偽物。Google TTS はアプリから直接呼ばれない
   const gasCalls = [];
+  const summarizeCalls = [];
+  const failSummary = { on: true };
   const audioStore = new Map();
   const directTts = [];
   await context.route('https://texttospeech.googleapis.com/**', (route) => {
@@ -134,6 +136,17 @@ test('ブラウザでの取り込み・読み上げ・進捗・クラウド音�
         { name: 'ja-JP-Wavenet-B', ssmlGender: 'FEMALE', languageCodes: ['ja-JP'] },
         { name: 'ja-JP-Chirp3-HD-Aoede', ssmlGender: 'FEMALE', languageCodes: ['ja-JP'] },
       ] });
+    }
+    if (body.action === 'summarize') {
+      summarizeCalls.push(body);
+      if (String(body.title).includes('要約失敗') && failSummary.on) return reply({ ok: false, error: 'AI要約に失敗しました（500）：テスト' });
+      return reply({ ok: true, summary: {
+        tldr: `「${body.title}」の結論です。`,
+        points: ['一つ目の要点', '二つ目の要点', '三つ目の要点'],
+        terms: [{ word: 'テスト用語', note: 'テストのための言葉' }],
+        verdict: { level: '高', reason: '具体例が多いため' },
+        model: 'gemini-test', truncated: false, at: 1760000000000,
+      } });
     }
     if (body.action === 'tts') {
       ttsRequests.push({ voice: body.voice, input: { text: body.text } });
@@ -346,6 +359,56 @@ test('ブラウザでの取り込み・読み上げ・進捗・クラウド音�
       await page.waitForSelector('.reader h1');
       assert.equal(await page.textContent('.reader h1'), '自分のメモ');
       assert.deepEqual(await page.$$eval('.seg', (els) => els.map((e) => e.textContent)), ['買い物', '牛乳']);
+    });
+
+    await t.test('AI要約：取り込むと自動で要約され、記事画面と本棚に出る（本文の読み上げには混ざらない）', async () => {
+      await page.goto(base + '#/');
+      await page.waitForSelector('#import-input');
+      await page.fill('#import-input', '要約テスト記事\n\n本文の一文目です。本文の二文目です。');
+      await page.click('#import-btn');
+      await page.waitForSelector('#summary-box .tldr', { timeout: 5000 });
+      assert.equal(await page.textContent('#summary-box .tldr'), '「要約テスト記事」の結論です。');
+      assert.deepEqual(await page.$$eval('#summary-box li', (els) => els.map((e) => e.textContent)), ['一つ目の要点', '二つ目の要点', '三つ目の要点']);
+      assert.match(await page.textContent('#summary-box'), /テスト用語/);
+      assert.match(await page.textContent('#summary-box .verdict'), /高/);
+      const call = summarizeCalls.at(-1);
+      assert.equal(call.title, '要約テスト記事');
+      assert.deepEqual(call.blocks, [{ type: 'p', text: '要約テスト記事' }, { type: 'p', text: '本文の一文目です。本文の二文目です。' }]);
+      // 本文の読み上げ対象（.seg）は本文だけ
+      const segs = await page.$$eval('.seg', (els) => els.map((e) => e.textContent));
+      assert.ok(!segs.some((t) => t.includes('要点')), JSON.stringify(segs));
+      // 本棚にも1行要約
+      await page.goto(base + '#/');
+      await page.waitForSelector('.doc-summary');
+      const lines = await page.$$eval('.doc-summary', (els) => els.map((e) => e.textContent));
+      assert.ok(lines.some((t) => t.includes('「要約テスト記事」の結論です。')), JSON.stringify(lines));
+      // 開き直しても要約は端末に残り、もう一度は頼まない
+      const before = summarizeCalls.length;
+      await page.click('text=要約テスト記事');
+      await page.waitForSelector('#summary-box .tldr');
+      assert.equal(summarizeCalls.length, before);
+    });
+
+    await t.test('AI要約：失敗しても記事は残り、「もう一度要約する」で作り直せる', async () => {
+      await page.goto(base + '#/');
+      await page.waitForSelector('#import-input');
+      await page.fill('#import-input', '要約失敗する記事\n\nこの記事は最初の要約に失敗します。');
+      await page.click('#import-btn');
+      await page.waitForSelector('#summary-btn', { timeout: 5000 });
+      assert.match(await page.textContent('#summary-box'), /要約できませんでした/);
+      assert.equal(await page.textContent('#summary-btn'), 'もう一度要約する');
+      assert.equal(await page.textContent('.reader h1'), '要約失敗する記事');
+      assert.ok((await page.$$('.seg')).length > 0, '本文は読める');
+      failSummary.on = false;
+      await page.click('#summary-btn');
+      await page.waitForSelector('#summary-box .tldr', { timeout: 5000 });
+      assert.equal(await page.textContent('#summary-box .tldr'), '「要約失敗する記事」の結論です。');
+      // 作り直すボタンでもう一度頼める
+      const before = summarizeCalls.length;
+      await page.click('#summary-btn');
+      await page.waitForFunction((n) => document.querySelector('#summary-box .tldr') && true, before);
+      await page.waitForTimeout(300);
+      assert.equal(summarizeCalls.length, before + 1);
     });
 
     await t.test('クラウド音声をDriveで共有：別の端末（音声キャッシュ無し）でも生成し直さない', async () => {

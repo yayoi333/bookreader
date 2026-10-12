@@ -11,7 +11,7 @@ const $ = (sel, root = document) => root.querySelector(sel);
 const view = $('#view');
 const player = new Player();
 const APP_URL = new URL('./', location.href).href;
-export const APP_VERSION = '0.2.0';
+export const APP_VERSION = '0.3.0';
 
 const esc = (s) =>
   String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
@@ -115,7 +115,11 @@ async function saveImported(doc, { forceDrive = false } = {}) {
   let saved;
   if (existing) {
     saved = { ...existing, title: doc.title, author: doc.author, blocks: doc.blocks, updatedAt: Date.now() };
-    if (JSON.stringify(existing.blocks) !== JSON.stringify(doc.blocks)) saved.progress = 0;
+    if (JSON.stringify(existing.blocks) !== JSON.stringify(doc.blocks)) {
+      saved.progress = 0;
+      delete saved.summary; // 本文が変わったので要約も作り直す
+      delete saved.summaryError;
+    }
   } else {
     saved = { ...doc, id: newId(), createdAt: Date.now(), updatedAt: Date.now(), progress: 0 };
   }
@@ -123,14 +127,104 @@ async function saveImported(doc, { forceDrive = false } = {}) {
   if (driveConfigured() && !saved.driveFileId && (forceDrive || getSettings().autoSaveDrive)) {
     saveToDrive(saved, { quiet: true });
   }
+  if (driveConfigured() && !saved.summary) summarizeDoc(saved.id, { quiet: true });
   return saved;
+}
+
+// ---------------------------------------------------------------- AI要約（GAS の summarize → Gemini）
+
+const summarizing = new Set();
+
+async function summarizeDoc(id, { quiet = false } = {}) {
+  if (summarizing.has(id)) return;
+  const doc = await docs.get(id);
+  if (!doc || !doc.blocks?.length) return;
+  summarizing.add(id);
+  refreshSummaryUI(id);
+  try {
+    const res = await drive.summarize(doc);
+    const sameBody = JSON.stringify(doc.blocks);
+    await docs.update(id, (latest) => {
+      // 要約中に本文が差し替わっていたら、古い本文の要約は付けない
+      if (JSON.stringify(latest.blocks) !== sameBody) return null;
+      const next = { ...latest, summary: res.summary };
+      delete next.summaryError;
+      return next;
+    });
+  } catch (e) {
+    await docs.update(id, (latest) => ({ ...latest, summaryError: e.message }));
+    if (!quiet || e.quota) toast(`要約できませんでした：${e.message}`, 6000);
+  } finally {
+    summarizing.delete(id);
+    refreshSummaryUI(id);
+  }
+}
+
+/** 開いている画面の要約部分だけを書き換える（読み上げ中でも本文は作り直さない） */
+async function refreshSummaryUI(id) {
+  const doc = await docs.get(id);
+  if (!doc) return;
+  const box = view.querySelector(`#summary-box[data-id="${CSS.escape(id)}"]`);
+  if (box) {
+    box.outerHTML = summaryBoxHtml(doc);
+    bindSummaryBox(doc.id);
+  }
+  const line = view.querySelector(`.doc-summary[data-id="${CSS.escape(id)}"]`);
+  if (line) line.outerHTML = summaryLineHtml(doc);
+}
+
+const VERDICT_LABEL = { 高: '全文も読む価値：高', 中: '全文も読む価値：中', 低: '要約で十分' };
+
+function summaryLineHtml(d) {
+  const s = d.summary;
+  const body = summarizing.has(d.id)
+    ? '<span class="muted">要約中…</span>'
+    : s
+      ? `<span class="verdict v-${esc(s.verdict?.level || '中')}">${esc(s.verdict?.level || '中')}</span>${esc(s.tldr)}`
+      : '';
+  return `<span class="doc-summary" data-id="${esc(d.id)}">${body}</span>`;
+}
+
+function summaryBoxHtml(doc) {
+  const s = doc.summary;
+  const id = esc(doc.id);
+  if (summarizing.has(doc.id)) {
+    return `<section id="summary-box" class="summary-box" data-id="${id}"><p class="muted">AIが要約しています…</p></section>`;
+  }
+  if (s) {
+    const terms = (s.terms || []).length
+      ? `<h3>用語</h3><dl>${s.terms.map((t) => `<dt>${esc(t.word)}</dt><dd>${esc(t.note)}</dd>`).join('')}</dl>`
+      : '';
+    return `<section id="summary-box" class="summary-box" data-id="${id}">
+      <div class="summary-head"><h2>AI要約</h2>
+        <span class="verdict v-${esc(s.verdict?.level || '中')}">${esc(VERDICT_LABEL[s.verdict?.level] || VERDICT_LABEL['中'])}</span></div>
+      <p class="tldr">${esc(s.tldr)}</p>
+      <ul>${(s.points || []).map((p) => `<li>${esc(p)}</li>`).join('')}</ul>
+      ${terms}
+      ${s.verdict?.reason ? `<p class="hint">${esc(s.verdict.reason)}</p>` : ''}
+      ${s.truncated ? '<p class="hint">長い記事なので、前半だけを要約しています。</p>' : ''}
+      <div class="row"><button class="ghost small" id="summary-btn">作り直す</button></div>
+    </section>`;
+  }
+  if (!driveConfigured()) {
+    return `<section id="summary-box" class="summary-box" data-id="${id}">
+      <p class="hint">設定画面でDrive連携（GAS）を設定すると、AI要約が使えます。</p></section>`;
+  }
+  return `<section id="summary-box" class="summary-box" data-id="${id}">
+    ${doc.summaryError ? `<p class="hint">要約できませんでした：${esc(doc.summaryError)}</p>` : ''}
+    <div class="row"><button class="ghost" id="summary-btn">${doc.summaryError ? 'もう一度要約する' : 'AIで要約する'}</button></div>
+  </section>`;
+}
+
+function bindSummaryBox(id) {
+  const btn = $('#summary-btn');
+  if (btn) btn.onclick = () => summarizeDoc(id);
 }
 
 async function saveToDrive(doc, { quiet = false } = {}) {
   try {
     const res = await drive.save(doc);
-    const latest = (await docs.get(doc.id)) || doc;
-    await docs.put({ ...latest, driveFileId: res.id, driveUrl: res.url, updatedAt: latest.updatedAt });
+    await docs.update(doc.id, (latest) => ({ ...latest, driveFileId: res.id, driveUrl: res.url }));
     toast(quiet ? 'Driveにも保存しました' : 'Driveに保存しました');
     if (location.hash === `#/doc/${doc.id}`) route();
   } catch (e) {
@@ -280,6 +374,7 @@ function docItem(d) {
     <li>
       <a class="doc-item" href="#/doc/${esc(d.id)}">
         <span class="doc-title">${esc(d.title)}</span>
+        ${summaryLineHtml(d)}
         <span class="doc-meta">${esc(meta)}${d.driveFileId ? ' · <span class="badge">Drive</span>' : ''}</span>
         <span class="bar"><span style="width:${pct}%"></span></span>
       </a>
@@ -335,9 +430,11 @@ async function renderReader(id) {
           }
         </div>
       </header>
+      ${summaryBoxHtml(doc)}
       <div class="reader-body">${html || '<p class="empty">本文がありません</p>'}</div>
     </article>`;
   $('#read-btn').onclick = () => player.play(player.finished ? 0 : player.index);
+  bindSummaryBox(doc.id);
   const driveBtn = $('#drive-btn');
   if (driveBtn) {
     driveBtn.onclick = () => {

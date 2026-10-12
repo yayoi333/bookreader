@@ -43,6 +43,11 @@ async function call(action, payload = {}) {
       err.raw = json.message || '';
       throw err;
     }
+    if (json.error === 'summary_quota') {
+      const err = new Error(json.message || 'AI要約の無料枠の上限に達しました');
+      err.quota = true;
+      throw err;
+    }
     if (json.error === 'unauthorized') throw new Error('トークンが違います（GASの setup 実行時に表示された値を入力）');
     throw new Error(json.error || 'Drive連携でエラーが発生しました');
   }
@@ -65,4 +70,5 @@ export const drive = {
   audioPut: (key, data) => call('audioPut', { key, data }),
   tts: (voice, text) => call('tts', { voice, text }),
   voices: () => call('voices'),
+  summarize: (doc) => call('summarize', { title: doc.title, blocks: doc.blocks }),
 };

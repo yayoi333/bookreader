@@ -178,3 +178,25 @@ code.clip { max-height: 4.5em; overflow: hidden; }
 
 .version { text-align: center; font-size: 12px; color: var(--ink-soft); margin: 24px 0 8px; }
 .boot-error { margin: 16px; padding: 12px; border-radius: 10px; background: #fde8e4; color: #8a1f0c; font-size: 13px; overflow-wrap: anywhere; }
+
+/* AI要約 */
+.summary-box { background: var(--paper); border: 1px solid var(--line); border-radius: var(--radius); padding: 14px 16px; margin: 4px 0 20px; box-shadow: var(--shadow); }
+.summary-box h2 { font-size: 15px; margin: 0; }
+.summary-box h3 { font-size: 13px; margin: 12px 0 4px; color: var(--ink-soft); }
+.summary-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+.summary-box .tldr { font-weight: 600; line-height: 1.6; margin: 10px 0 6px; }
+.summary-box ul { margin: 0; padding-left: 1.2em; line-height: 1.65; }
+.summary-box li { margin: 3px 0; }
+.summary-box dl { margin: 0; display: grid; grid-template-columns: max-content 1fr; gap: 4px 10px; font-size: 14px; }
+.summary-box dt { font-weight: 600; }
+.summary-box dd { margin: 0; color: var(--ink-soft); }
+.summary-box .row { margin-top: 10px; }
+.summary-box .small { font-size: 13px; padding: 4px 10px; }
+.muted { color: var(--ink-soft); }
+.verdict { display: inline-block; font-size: 11px; font-weight: 600; padding: 1px 7px; border-radius: 999px; border: 1px solid currentColor; margin-right: 6px; white-space: nowrap; }
+.summary-head .verdict { margin-right: 0; }
+.verdict.v-高 { color: var(--accent); }
+.verdict.v-中, .verdict.v-低 { color: var(--ink-soft); }
+.doc-summary { font-size: 13px; line-height: 1.5; color: var(--ink); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.doc-summary:empty { display: none; }
+@media (max-width: 480px) { .summary-box dl { grid-template-columns: 1fr; } .summary-box dd { margin-bottom: 4px; } }
