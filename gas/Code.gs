@@ -8,6 +8,10 @@
  *        次のユーザーとして実行: 自分 / アクセスできるユーザー: 全員
  *      → 表示された URL（…/exec）を控える
  *   4. よみあげ文庫の設定画面に URL と TOKEN を入れて「接続テスト」
+ *   5. （クラウド音声を使う場合）左の「プロジェクトの設定」→「スクリプト プロパティ」に
+ *        プロパティ: TTS_API_KEY / 値: Google Cloud の APIキー
+ *      を追加する。キーはここにだけ置き、アプリ（ブラウザ）には保存しない。
+ *   6. （旧版「自分専用の図書館」の引っ越し）関数選択で「importOldLibrary」を選んで1回実行
  *
  * コードを書き換えたら「デプロイを管理」→ 編集 → バージョン「新バージョン」で更新（URLは変わらない）。
  */
@@ -49,6 +53,10 @@ function doPost(e) {
         return json_(audioGet_(req.key));
       case 'audioPut':
         return json_(audioPut_(req.key, req.data));
+      case 'tts':
+        return json_(tts_(req.voice, req.text));
+      case 'voices':
+        return json_(voices_());
       default:
         return json_({ ok: false, error: '不明な操作です: ' + req.action });
     }
@@ -270,4 +278,121 @@ function audioPut_(key, data) {
   if (folder.getFilesByName(name).hasNext()) return { ok: true, existed: true };
   folder.createFile(Utilities.newBlob(Utilities.base64Decode(String(data || '')), 'audio/mpeg', name));
   return { ok: true };
+}
+
+// ---- クラウド音声（Google Cloud Text-to-Speech）の代理生成 ----
+// APIキーはスクリプトプロパティ TTS_API_KEY にだけ置く。アプリ側にはキーを渡さない。
+
+const TTS_API = 'https://texttospeech.googleapis.com/v1';
+
+function ttsKey_() {
+  const key = PropertiesService.getScriptProperties().getProperty('TTS_API_KEY');
+  if (!key) throw new Error('クラウド音声のAPIキーが未設定です（GASの「スクリプト プロパティ」に TTS_API_KEY を追加）');
+  return key;
+}
+
+/** Google の応答をアプリに返す形にする。失敗は status と生のメッセージを付けて返し、アプリ側で言い換える */
+function ttsFetch_(path, options) {
+  const res = UrlFetchApp.fetch(TTS_API + path + (path.indexOf('?') < 0 ? '?' : '&') + 'key=' + encodeURIComponent(ttsKey_()),
+    Object.assign({ muteHttpExceptions: true }, options || {}));
+  const code = res.getResponseCode();
+  let body = {};
+  try {
+    body = JSON.parse(res.getContentText() || '{}');
+  } catch (e) {
+    body = {};
+  }
+  if (code >= 400) {
+    return { ok: false, error: 'tts', status: code, message: (body.error && body.error.message) || '' };
+  }
+  return { ok: true, body: body };
+}
+
+function tts_(voice, text) {
+  voice = String(voice || '');
+  text = String(text || '');
+  if (!/^[a-z]{2,3}-[A-Z]{2}-[\w-]+$/.test(voice)) throw new Error('声の名前が正しくありません');
+  if (!text) throw new Error('読み上げる文章がありません');
+  const languageCode = voice.split('-').slice(0, 2).join('-');
+  const r = ttsFetch_('/text:synthesize', {
+    method: 'post',
+    contentType: 'application/json',
+    payload: JSON.stringify({
+      input: { text: text },
+      voice: { languageCode: languageCode, name: voice },
+      // 速度は再生側で変えるので、生成は等速
+      audioConfig: { audioEncoding: 'MP3' },
+    }),
+  });
+  if (!r.ok) return r;
+  return { ok: true, data: r.body.audioContent || '', chars: text.length };
+}
+
+function voices_() {
+  const r = ttsFetch_('/voices?languageCode=ja-JP', { method: 'get' });
+  if (!r.ok) return r;
+  return { ok: true, voices: r.body.voices || [] };
+}
+
+// ---- 旧版「自分専用の図書館」からの引っ越し（GASエディタで importOldLibrary を1回実行） ----
+// 旧フォルダのファイルは読むだけで、消したり書き換えたりしない。
+
+const OLD_FOLDER_NAME = '自分専用の図書館';
+
+/** 旧版のブロック → 新版のブロック。画像・動画は読み上げないので移さない */
+function convertOldBlocks_(blocks) {
+  const out = [];
+  (blocks || []).forEach(function (b) {
+    if (!b) return;
+    if (b.type === 'heading' && b.text) out.push({ type: 'h', text: String(b.text) });
+    else if (b.type === 'paragraph' && b.text) out.push({ type: 'p', text: String(b.text) });
+    else if (b.type === 'quote' && b.text) out.push({ type: 'quote', text: String(b.text) });
+    else if (b.type === 'list') {
+      (b.items || []).forEach(function (item) {
+        const t = typeof item === 'string' ? item : item && item.text;
+        if (t) out.push({ type: 'li', text: String(t) });
+      });
+    }
+  });
+  return out;
+}
+
+/** 同じ記事（同じ元URL）が複数あれば、保存日が新しい方だけ残す */
+function pickLatestOld_(records) {
+  const byUrl = {};
+  const noUrl = [];
+  records.forEach(function (r) {
+    const url = r.sourceUrl || '';
+    if (!url) return noUrl.push(r);
+    if (!byUrl[url] || String(r.savedAt || '') > String(byUrl[url].savedAt || '')) byUrl[url] = r;
+  });
+  return Object.keys(byUrl).map(function (k) { return byUrl[k]; }).concat(noUrl);
+}
+
+function importOldLibrary() {
+  const it = DriveApp.getFoldersByName(OLD_FOLDER_NAME);
+  if (!it.hasNext()) throw new Error('Driveに「' + OLD_FOLDER_NAME + '」フォルダが見つかりません');
+  const files = it.next().getFiles();
+  const records = [];
+  while (files.hasNext()) {
+    const f = files.next();
+    if (!/\.json$/i.test(f.getName())) continue;
+    try {
+      records.push(JSON.parse(f.getBlob().getDataAsString('UTF-8')));
+    } catch (e) {
+      Logger.log('読めないファイルを飛ばしました: ' + f.getName());
+    }
+  }
+  const result = { found: records.length, saved: 0, skipped: 0 };
+  pickLatestOld_(records).forEach(function (r) {
+    const blocks = convertOldBlocks_(r.blocks);
+    if (!blocks.length) {
+      result.skipped++;
+      return;
+    }
+    save_({ title: r.title, url: r.sourceUrl || '', author: r.author || '', blocks: blocks });
+    result.saved++;
+  });
+  Logger.log('旧版の引っ越し: JSON ' + result.found + '件 → 保存 ' + result.saved + '件（本文なしで飛ばした ' + result.skipped + '件）');
+  return result;
 }

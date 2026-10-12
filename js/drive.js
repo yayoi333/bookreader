@@ -1,13 +1,20 @@
 // Google Drive 連携（自分の Google Apps Script ウェブアプリ経由。gas/Code.gs を参照）
-import { getSettings } from './settings.js';
+import { getSettings, saveSettings } from './settings.js';
+import { sealSecret, openSecret } from './secret.js';
 
 export function driveConfigured() {
   const s = getSettings();
-  return Boolean(s.gasUrl && s.gasToken);
+  return Boolean(s.gasUrl && s.gasTokenBox);
+}
+
+/** トークンを暗号化して保存する。空文字なら消す */
+export async function setGasToken(token) {
+  saveSettings({ gasTokenBox: token ? await sealSecret(token) : null });
 }
 
 async function call(action, payload = {}) {
-  const { gasUrl, gasToken } = getSettings();
+  const { gasUrl, gasTokenBox } = getSettings();
+  const gasToken = await openSecret(gasTokenBox);
   if (!gasUrl || !gasToken) throw new Error('Drive連携が未設定です（設定画面でGASのURLとトークンを入力）');
   let res;
   try {
@@ -28,6 +35,14 @@ async function call(action, payload = {}) {
     throw new Error('GASからの応答が読めません。ウェブアプリとして公開されているか確認してください');
   }
   if (!json.ok) {
+    if (json.error === 'tts') {
+      // クラウド音声の失敗は、呼び出し側（engines/cloud.js）で言い換える
+      const err = new Error(json.message || 'クラウド音声の生成に失敗しました');
+      err.tts = true;
+      err.status = json.status;
+      err.raw = json.message || '';
+      throw err;
+    }
     if (json.error === 'unauthorized') throw new Error('トークンが違います（GASの setup 実行時に表示された値を入力）');
     throw new Error(json.error || 'Drive連携でエラーが発生しました');
   }
@@ -48,4 +63,6 @@ export const drive = {
   get: (id) => call('get', { id }),
   audioGet: (key) => call('audioGet', { key }),
   audioPut: (key, data) => call('audioPut', { key, data }),
+  tts: (voice, text) => call('tts', { voice, text }),
+  voices: () => call('voices'),
 };

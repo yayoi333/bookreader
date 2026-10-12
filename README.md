@@ -31,7 +31,7 @@ Xのポスト・X記事、Web記事、Google Driveのメモを **本文だけ** 
 
 - **GitHub Pages**：Settings → Pages → Source「Deploy from a branch」→ `main` / `(root)`。
   URLは `https://yayoi333.github.io/bookreader/`。
-  ※ **非公開リポジトリでPagesを使うには有料プラン（GitHub Pro）が必要**です。無料で使うなら、リポジトリを公開にする（コードに秘密情報は入っていません。APIキー等は各端末の中だけに保存）か、
+  ※ **非公開リポジトリでPagesを使うには有料プラン（GitHub Pro）が必要**です。無料で使うなら、リポジトリを公開にする（コードに秘密情報は入っていません。クラウド音声のAPIキーは自分のGASのスクリプトプロパティにだけ置き、GASのトークンは端末内で暗号化して保存）か、
   Cloudflare Pages / Netlify（非公開リポジトリでも無料）に接続してください。
 - 公開URLが `https://yayoi333.github.io/bookreader/` 以外になる場合は、ユーザースクリプトのメニュー「よみあげ文庫のURLを設定」で変更してください。
 
@@ -39,13 +39,17 @@ Xのポスト・X記事、Web記事、Google Driveのメモを **本文だけ** 
 
 アプリ内の「使い方」画面に、端末に合わせた手順が出ます。概要：
 
-1. **クラウド音声**（画面オフで聞きたい場合）
+1. **Drive連携**：`gas/Code.gs` を Google Apps Script に貼る → `setup` を実行してトークンを控える → ウェブアプリとしてデプロイ（実行：自分／アクセス：全員）→ URLとトークンをアプリに入力
+2. **クラウド音声**（画面オフで聞きたい場合。1のDrive連携が必要）
    Google Cloud でプロジェクト作成 → 請求先アカウント設定 → 「Cloud Text-to-Speech API」を有効化 → APIキー作成
-   → キーを制限（ウェブサイト＝アプリのURL、API＝Text-to-Speechのみ）→ 予算アラート設定 → アプリの設定に貼る
-2. **Drive連携**：`gas/Code.gs` を Google Apps Script に貼る → `setup` を実行してトークンを控える → ウェブアプリとしてデプロイ（実行：自分／アクセス：全員）→ URLとトークンをアプリに入力
-3. **iPhone**：ショートカットAppで「共有シートに表示」するショートカットを作る（URLエンコード → `アプリURL?q=` に連結 → URLを開く）
-4. **Android**：Chromeで開いて「ホーム画面に追加」→ Xアプリの共有メニューに出てくる
-5. **PC**：Tampermonkey に `userscript/yomiage-x.user.js` を入れると、Xのポスト/記事に ▶ が付く
+   → キーを制限（アプリケーションの制限＝なし ※GASから呼ぶため、API＝Text-to-Speechのみ）→ 予算アラート設定
+   → GASの「プロジェクトの設定」→「スクリプト プロパティ」に `TTS_API_KEY` として追加（**アプリには貼らない**）
+   - 旧版（v0.1.x）でアプリに貼っていたAPIキーは、v0.2.0 を開いたときに端末から自動で消えます
+3. **旧版「自分専用の図書館」の引っ越し**（同じGoogleアカウントのDriveにある場合）：GASエディタで `importOldLibrary` を1回実行。
+   旧フォルダの .json を読み、同じ記事は新しい保存だけを「よみあげ文庫」へGoogleドキュメントで保存（旧フォルダは変更しない。画像・動画・旧版のハイライトと読書位置は移らない）
+4. **iPhone**：ショートカットAppで「共有シートに表示」するショートカットを作る（URLエンコード → `アプリURL?q=` に連結 → URLを開く）
+5. **Android**：Chromeで開いて「ホーム画面に追加」→ Xアプリの共有メニューに出てくる
+6. **PC**：Tampermonkey に `userscript/yomiage-x.user.js` を入れると、Xのポスト/記事に ▶ が付く
 
 ## 仕組み
 
@@ -54,11 +58,12 @@ index.html / css / js/
   app.js          画面（本棚・読む・設定・Drive・使い方）
   player.js       再生の司令塔（方式切替・ロック画面操作・続きから・画面消灯防止）
   engines/speech.js  端末の声（文ごとに読み上げ。Chromeの長文途切れ対策込み）
-  engines/cloud.js   クラウド音声（最初は短く生成してすぐ再生、残りは先読み。音声は端末にキャッシュ）
+  engines/cloud.js   クラウド音声（生成は自分のGAS経由。最初は短く生成してすぐ再生、残りは先読み。音声は端末にキャッシュ）
   text.js         文分割・読み上げ用の整形・音声化の分割（DOM非依存）
   x-article.js    X記事の取り込み（FxTwitter API）
   extract.js      URL/テキスト/HTML → 本文（Mozilla Readability）
   drive.js        GAS連携
+  secret.js       GASのトークンを端末内で暗号化（取り出し不可のWeb Crypto鍵）
 gas/Code.gs       Drive連携のサーバー側（自分のGoogleアカウントで動く）
 userscript/       PC用：Xに▶を付けるユーザースクリプト
 vendor/           Mozilla Readability（Apache-2.0）

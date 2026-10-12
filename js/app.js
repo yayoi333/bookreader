@@ -1,9 +1,9 @@
 import { docs, newId, audioCache } from './db.js';
 import { buildSegments, blocksFromPlainText } from './text.js';
 import { importFromInput, docFromPageHtml } from './extract.js';
-import { drive, driveConfigured } from './drive.js';
+import { drive, driveConfigured, setGasToken } from './drive.js';
 import { Player } from './player.js';
-import { getSettings, saveSettings, RATES, isIOS, isAndroid } from './settings.js';
+import { getSettings, saveSettings, migrateSecrets, RATES, isIOS, isAndroid } from './settings.js';
 import { getJapaneseVoices, speechSupported } from './engines/speech.js';
 import { listCloudVoices, monthlyUsage, freeTierFor } from './engines/cloud.js';
 
@@ -11,7 +11,7 @@ const $ = (sel, root = document) => root.querySelector(sel);
 const view = $('#view');
 const player = new Player();
 const APP_URL = new URL('./', location.href).href;
-export const APP_VERSION = '0.1.6';
+export const APP_VERSION = '0.2.0';
 
 const esc = (s) =>
   String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
@@ -460,8 +460,7 @@ async function renderSettings() {
 
     <section class="card">
       <h2>クラウド音声（Google Cloud Text-to-Speech）</h2>
-      <label class="label" for="cloud-key">APIキー</label>
-      <input id="cloud-key" type="password" autocomplete="off" value="${esc(s.cloudKey)}" placeholder="AIza…">
+      <p class="hint">音声は自分のGAS（Drive連携）が代わりに作ります。APIキーはGASの「スクリプト プロパティ」<code>TTS_API_KEY</code> にだけ置き、この端末には保存しません。</p>
       <label class="label" for="cloud-voice">声</label>
       <div class="row">
         <select id="cloud-voice"><option value="${esc(s.cloudVoice)}">${esc(s.cloudVoice)}</option></select>
@@ -479,7 +478,8 @@ async function renderSettings() {
       <label class="label" for="gas-url">GAS ウェブアプリのURL</label>
       <input id="gas-url" type="url" value="${esc(s.gasUrl)}" placeholder="https://script.google.com/macros/s/…/exec">
       <label class="label" for="gas-token">トークン</label>
-      <input id="gas-token" type="password" autocomplete="off" value="${esc(s.gasToken)}">
+      <input id="gas-token" type="password" autocomplete="off" value="" placeholder="${s.gasTokenBox ? '設定済み（変えるときだけ入力）' : 'setup の実行ログに出たトークン'}">
+      <p class="hint">トークンはこの端末の中で暗号化して保存します。入力欄には戻しません。</p>
       <label class="check"><input type="checkbox" id="auto-drive" ${s.autoSaveDrive ? 'checked' : ''}> 取り込んだらDriveにも自動保存</label>
       <label class="check"><input type="checkbox" id="drive-audio" ${s.driveAudio !== false ? 'checked' : ''}> クラウド音声をDriveにも保存（別の端末では作り直さず、Driveの音声を使う）</label>
       <div class="row"><button id="gas-test" class="ghost">接続テスト</button></div>
@@ -517,15 +517,11 @@ async function renderSettings() {
   };
   $('#keep-alive').onchange = (e) => saveSettings({ keepAlive: e.target.checked });
 
-  $('#cloud-key').onchange = (e) => saveSettings({ cloudKey: e.target.value.trim() });
   const cv = $('#cloud-voice');
   cv.onchange = () => saveSettings({ cloudVoice: cv.value });
   $('#cloud-voices').onclick = async () => {
-    const key = $('#cloud-key').value.trim();
-    if (!key) return toast('先にAPIキーを入力してください');
-    saveSettings({ cloudKey: key });
     try {
-      const voices = await listCloudVoices(key);
+      const voices = await listCloudVoices();
       cv.innerHTML = voices
         .map((v) => `<option value="${esc(v.name)}">${esc(v.name)}（${v.gender === 'FEMALE' ? '女性' : v.gender === 'MALE' ? '男性' : '—'}）</option>`)
         .join('');
@@ -543,11 +539,19 @@ async function renderSettings() {
   };
 
   $('#gas-url').onchange = (e) => saveSettings({ gasUrl: e.target.value.trim() });
-  $('#gas-token').onchange = (e) => saveSettings({ gasToken: e.target.value.trim() });
+  const saveTokenInput = async () => {
+    const t = $('#gas-token').value.trim();
+    if (!t) return; // 空欄は「変更しない」
+    await setGasToken(t);
+    $('#gas-token').value = '';
+    $('#gas-token').placeholder = '設定済み（変えるときだけ入力）';
+  };
+  $('#gas-token').onchange = saveTokenInput;
   $('#auto-drive').onchange = (e) => saveSettings({ autoSaveDrive: e.target.checked });
   $('#drive-audio').onchange = (e) => saveSettings({ driveAudio: e.target.checked });
   $('#gas-test').onclick = async () => {
-    saveSettings({ gasUrl: $('#gas-url').value.trim(), gasToken: $('#gas-token').value.trim() });
+    saveSettings({ gasUrl: $('#gas-url').value.trim() });
+    await saveTokenInput();
     try {
       const r = await drive.ping();
       toast(`接続OK：Driveのフォルダ「${r.folder}」に保存します`);
@@ -691,9 +695,10 @@ function renderHelp() {
       <ol>
         <li><a href="https://console.cloud.google.com/" target="_blank" rel="noopener">Google Cloud</a> でプロジェクトを作り、<b>請求先アカウント</b>を設定（無料枠内なら0円。カード登録は必要）。</li>
         <li>「Cloud Text-to-Speech API」を<b>有効化</b>。</li>
-        <li>「認証情報」→「APIキーを作成」。<b>キーを制限</b>：ウェブサイト＝<code>${esc(new URL(APP_URL).origin)}/*</code>、API＝Cloud Text-to-Speech API のみ。</li>
+        <li>「認証情報」→「APIキーを作成」。<b>キーを制限</b>：アプリケーションの制限＝なし（GASから使うため）、API＝Cloud Text-to-Speech API のみ。</li>
         <li>「予算とアラート」で<b>月100円などの予算アラート</b>を設定しておくと安心。</li>
-        <li>このアプリの設定にAPIキーを貼り、「声の一覧を取得」→ 好きな声を選ぶ。</li>
+        <li>先に下の「Drive連携」を済ませ、GASの「プロジェクトの設定」→「スクリプト プロパティ」に <code>TTS_API_KEY</code> としてAPIキーを追加。<b>アプリにはキーを貼りません。</b></li>
+        <li>このアプリの設定で「声の一覧を取得」→ 好きな声を選ぶ。</li>
       </ol>
     </section>
 
@@ -736,6 +741,11 @@ async function route() {
 }
 
 async function init() {
+  // 以前の版が平文で保存していたトークン・APIキーを片付ける
+  const removedCloudKey = await migrateSecrets().catch(() => false);
+  if (removedCloudKey) {
+    setTimeout(() => toast('安全のため、この端末に保存していたクラウド音声のAPIキーを消しました。キーはGASのスクリプトプロパティ TTS_API_KEY に入れてください', 9000), 500);
+  }
   applyFontSize();
   setupPlayerBar();
   window.addEventListener('hashchange', route);

@@ -109,24 +109,41 @@ test('ブラウザでの取り込み・読み上げ・進捗・クラウド音�
   await context.route('https://api.fxtwitter.com/**', (route) =>
     route.fulfill({ contentType: 'application/json', headers: { 'access-control-allow-origin': '*' }, body: JSON.stringify(FX_ARTICLE) }),
   );
-  await context.route('https://texttospeech.googleapis.com/**', async (route) => {
-    const req = route.request();
-    const headers = { 'access-control-allow-origin': '*', 'access-control-allow-headers': '*' };
-    if (req.method() === 'OPTIONS') return route.fulfill({ status: 204, headers });
-    if (req.url().includes('/voices')) {
-      return route.fulfill({ contentType: 'application/json', headers, body: JSON.stringify({ voices: [
+  // 自分の GAS（Drive連携・クラウド音声の代理生成）の偽物。Google TTS はアプリから直接呼ばれない
+  const gasCalls = [];
+  const audioStore = new Map();
+  const directTts = [];
+  await context.route('https://texttospeech.googleapis.com/**', (route) => {
+    directTts.push(route.request().url());
+    return route.abort();
+  });
+  await context.route('https://script.google.com/**', async (route) => {
+    const body = JSON.parse(route.request().postData() || '{}');
+    gasCalls.push(body);
+    const reply = (obj) => route.fulfill({ contentType: 'application/json', headers: { 'access-control-allow-origin': '*' }, body: JSON.stringify(obj) });
+    if (body.token !== 'secret') return reply({ ok: false, error: 'unauthorized' });
+    if (body.action === 'ping') return reply({ ok: true, folder: 'よみあげ文庫' });
+    if (body.action === 'save') return reply({ ok: true, id: 'file-1', url: 'https://docs.google.com/document/d/file-1/edit' });
+    if (body.action === 'list') return reply({ ok: true, files: [{ id: 'memo-9', name: '自分のメモ', updated: 1760000000000 }] });
+    if (body.action === 'get') return reply({ ok: true, title: '自分のメモ', url: 'https://docs.google.com/document/d/memo-9/edit', blocks: [{ type: 'h', text: '買い物' }, { type: 'li', text: '牛乳' }] });
+    if (body.action === 'audioPut') { audioStore.set(body.key, body.data); return reply({ ok: true }); }
+    if (body.action === 'audioGet') return reply(audioStore.has(body.key) ? { ok: true, found: true, data: audioStore.get(body.key) } : { ok: true, found: false });
+    if (body.action === 'voices') {
+      return reply({ ok: true, voices: [
         { name: 'ja-JP-Wavenet-B', ssmlGender: 'FEMALE', languageCodes: ['ja-JP'] },
         { name: 'ja-JP-Chirp3-HD-Aoede', ssmlGender: 'FEMALE', languageCodes: ['ja-JP'] },
-      ] }) });
+      ] });
     }
-    const body = JSON.parse(req.postData());
-    ttsRequests.push(body);
-    // Google の「文が長すぎる」を再現：「表の行」を含む長いリクエストは断る。「絶対に読めない」は常に断る
-    const t = body.input.text;
-    if ((t.includes('表の行') && t.length > 40) || t.includes('絶対に読めない')) {
-      return route.fulfill({ status: 400, contentType: 'application/json', headers, body: JSON.stringify({ error: { code: 400, message: 'This request contains sentences that are too long. Sentence starting with: "表の行" is too long.' } }) });
+    if (body.action === 'tts') {
+      ttsRequests.push({ voice: body.voice, input: { text: body.text } });
+      // Google の「文が長すぎる」を再現（GAS は status と元のメッセージをそのまま返す）
+      const t = body.text;
+      if ((t.includes('表の行') && t.length > 40) || t.includes('絶対に読めない')) {
+        return reply({ ok: false, error: 'tts', status: 400, message: 'This request contains sentences that are too long. Sentence starting with: "表の行" is too long.' });
+      }
+      return reply({ ok: true, data: wavBase64(), chars: t.length });
     }
-    return route.fulfill({ contentType: 'application/json', headers, body: JSON.stringify({ audioContent: wavBase64() }) });
+    return reply({ ok: false, error: 'unknown' });
   });
   const page = await context.newPage();
   const errors = [];
@@ -204,11 +221,32 @@ test('ブラウザでの取り込み・読み上げ・進捗・クラウド音�
       assert.equal((await page.$$('.doc-title')).length, 2);
     });
 
+    await t.test('以前の版が平文で保存したトークン・APIキーは、起動時に暗号化／削除される', async () => {
+      await page.evaluate(() => {
+        const s = JSON.parse(localStorage.getItem('yomiage.settings.v1') || '{}');
+        localStorage.setItem('yomiage.settings.v1', JSON.stringify({
+          ...s, gasUrl: 'https://script.google.com/macros/s/TEST/exec', gasToken: 'secret', cloudKey: 'AIza-old-key',
+        }));
+      });
+      await page.goto(base + '#/settings');
+      await page.reload();
+      await page.waitForFunction(() => /APIキーを消しました/.test(document.querySelector('#toast').textContent), null, { timeout: 5000 });
+      const raw = await page.evaluate(() => localStorage.getItem('yomiage.settings.v1'));
+      assert.ok(!raw.includes('secret') && !raw.includes('AIza-old-key'), raw);
+      assert.ok(JSON.parse(raw).gasTokenBox?.data);
+      // 入力欄に値を戻さない
+      await page.waitForSelector('#gas-token');
+      assert.equal(await page.inputValue('#gas-token'), '');
+      // 暗号化したトークンで GAS に繋がる
+      await page.click('#gas-test');
+      await page.waitForFunction(() => /接続OK/.test(document.querySelector('#toast').textContent));
+    });
+
     await t.test('クラウド音声：声の一覧を取得し、音声ファイルで最後まで再生する', async () => {
       await page.goto(base + '#/settings');
-      await page.waitForSelector('#cloud-key');
+      await page.waitForSelector('#cloud-voices');
+      assert.equal(await page.$('#cloud-key'), null, 'APIキーの入力欄は無い');
       await page.check('input[name=engine][value=cloud]');
-      await page.fill('#cloud-key', 'AIza-test');
       await page.click('#cloud-voices');
       await page.waitForFunction(() => document.querySelectorAll('#cloud-voice option').length === 2);
       await page.selectOption('#cloud-voice', 'ja-JP-Chirp3-HD-Aoede');
@@ -221,8 +259,7 @@ test('ブラウザでの取り込み・読み上げ・進捗・クラウド音�
       await page.waitForFunction(() => document.querySelector('#p-pos').textContent === '読了', null, { timeout: 15000 });
       assert.ok(ttsRequests.length >= 1);
       const req = ttsRequests[0];
-      assert.equal(req.voice.name, 'ja-JP-Chirp3-HD-Aoede');
-      assert.equal(req.audioConfig.audioEncoding, 'MP3');
+      assert.equal(req.voice, 'ja-JP-Chirp3-HD-Aoede');
       assert.equal(req.input.text, 'はじめに。一つ目の文です。詳しくは を見てください。箇条書きの項目。最後の文です。');
       // 端末の声は使われていない
       assert.equal((await page.evaluate(() => window.__spoken)).length, 0);
@@ -281,21 +318,6 @@ test('ブラウザでの取り込み・読み上げ・進捗・クラウド音�
     });
 
     await t.test('Drive連携：接続テスト・自動保存・Driveの文書を開く', async () => {
-      const gasCalls = [];
-      const audioStore = new Map();
-      await context.route('https://script.google.com/**', async (route) => {
-        const body = JSON.parse(route.request().postData() || '{}');
-        gasCalls.push(body);
-        const reply = (obj) => route.fulfill({ contentType: 'application/json', headers: { 'access-control-allow-origin': '*' }, body: JSON.stringify(obj) });
-        if (body.token !== 'secret') return reply({ ok: false, error: 'unauthorized' });
-        if (body.action === 'ping') return reply({ ok: true, folder: 'よみあげ文庫' });
-        if (body.action === 'save') return reply({ ok: true, id: 'file-1', url: 'https://docs.google.com/document/d/file-1/edit' });
-        if (body.action === 'list') return reply({ ok: true, files: [{ id: 'memo-9', name: '自分のメモ', updated: 1760000000000 }] });
-        if (body.action === 'get') return reply({ ok: true, title: '自分のメモ', url: 'https://docs.google.com/document/d/memo-9/edit', blocks: [{ type: 'h', text: '買い物' }, { type: 'li', text: '牛乳' }] });
-        if (body.action === 'audioPut') { audioStore.set(body.key, body.data); return reply({ ok: true }); }
-        if (body.action === 'audioGet') return reply(audioStore.has(body.key) ? { ok: true, found: true, data: audioStore.get(body.key) } : { ok: true, found: false });
-        return reply({ ok: false, error: 'unknown' });
-      });
       await page.goto(base + '#/settings');
       await page.waitForSelector('#gas-url');
       await page.fill('#gas-url', 'https://script.google.com/macros/s/TEST/exec');
@@ -365,6 +387,8 @@ test('ブラウザでの取り込み・読み上げ・進捗・クラウド音�
       await article.close();
     });
 
+    assert.deepEqual(directTts, [], 'アプリから Google TTS を直接呼んでいない');
+    assert.ok(gasCalls.every((c) => !('key' in c && /^AIza/.test(c.key))));
     assert.deepEqual(errors, []);
   } finally {
     await browser.close();

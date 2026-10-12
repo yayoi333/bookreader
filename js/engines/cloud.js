@@ -1,4 +1,4 @@
-// クラウド音声（Google Cloud Text-to-Speech）。文章を音声ファイル(MP3)にして <audio> で再生する。
+// クラウド音声（Google Cloud Text-to-Speech を自分の GAS 経由で使う）。文章を音声ファイル(MP3)にして <audio> で再生する。
 // 音声ファイルの再生なので、スマホで画面オフ・別アプリに移動しても再生が続き、ロック画面から操作できる。
 // 無料枠：Chirp 3 HD / Neural2 は毎月100万文字、WaveNet / Standard は毎月400万文字（2026年10月時点の公式料金表）
 import { chunkSegments, chunkIndexOf, segmentAtRatio, ratioOfSegment, terminateSoftSplits } from '../text.js';
@@ -7,23 +7,33 @@ import { drive, driveConfigured } from '../drive.js';
 import { getSettings } from '../settings.js';
 import { base64ToBlob, sha256Hex, silentWavUrl } from '../audio-util.js';
 
-const API = 'https://texttospeech.googleapis.com/v1';
+// 生成は自分の GAS（gas/Code.gs の tts）が代わりに行う。APIキーは GAS のスクリプトプロパティにだけあり、
+// この端末には保存しない。
 
-function apiError(json, status) {
-  const m = json?.error?.message || '';
-  if (/API key not valid|API_KEY_INVALID/i.test(m)) return 'APIキーが正しくありません';
+function apiError(m, status) {
+  m = m || '';
+  if (/TTS_API_KEY/.test(m)) return m;
+  if (/API key not valid|API_KEY_INVALID/i.test(m)) return 'APIキーが正しくありません（GASのスクリプトプロパティ TTS_API_KEY）';
   if (/has not been used|is disabled|SERVICE_DISABLED/i.test(m)) return 'Cloud Text-to-Speech API が有効になっていません';
   if (/billing/i.test(m)) return '請求先アカウントが未設定です（無料枠内でも登録が必要です）';
-  if (/referer|referrer/i.test(m)) return 'APIキーの「ウェブサイトの制限」にこのアプリのURLが入っていません';
+  if (/referer|referrer/i.test(m)) return 'APIキーに「ウェブサイトの制限」が付いています。GAS から使うため、アプリケーションの制限を「なし」にしてください（APIの制限はText-to-Speechのみのままで可）';
   if (/voice/i.test(m) && /not|exist|invalid/i.test(m)) return `声の名前が無効です：${m}`;
   if (status === 429) return '短時間に使いすぎました。少し待ってから再生してください';
-  return m || `クラウド音声の生成に失敗しました（${status}）`;
+  return m || `クラウド音声の生成に失敗しました（${status || '不明'}）`;
 }
 
-export async function listCloudVoices(key) {
-  const res = await fetch(`${API}/voices?languageCode=ja-JP&key=${encodeURIComponent(key)}`);
-  const json = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(apiError(json, res.status));
+function needDrive() {
+  if (!driveConfigured()) throw new Error('クラウド音声はDrive連携（GAS）経由で作ります。設定画面でGASのURLとトークンを入れてください');
+}
+
+export async function listCloudVoices() {
+  needDrive();
+  let json;
+  try {
+    json = await drive.voices();
+  } catch (e) {
+    throw new Error(e.tts ? apiError(e.raw, e.status) : e.message);
+  }
   const rank = (n) => (/Chirp3-HD/.test(n) ? 0 : /Chirp-HD/.test(n) ? 1 : /Neural2/.test(n) ? 2 : /Wavenet/.test(n) ? 3 : 4);
   return (json.voices || [])
     .filter((v) => v.languageCodes?.some((l) => /^ja/i.test(l)))
@@ -35,28 +45,20 @@ export function freeTierFor(voice) {
   return /Wavenet|Standard/i.test(voice) ? 4_000_000 : 1_000_000;
 }
 
-export async function synthesize(key, voice, text) {
-  if (!key) throw new Error('クラウド音声のAPIキーが未設定です（設定画面）。Driveに保存済みの音声だけなら無くても再生できます');
-  const languageCode = voice.split('-').slice(0, 2).join('-') || 'ja-JP';
-  const res = await fetch(`${API}/text:synthesize?key=${encodeURIComponent(key)}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      input: { text },
-      voice: { languageCode, name: voice },
-      // 速度は再生側(playbackRate)で変えるので、生成は等速。速度を変えても作り直し不要
-      audioConfig: { audioEncoding: 'MP3' },
-    }),
-  });
-  const json = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    const err = new Error(apiError(json, res.status));
-    err.status = res.status;
-    err.raw = json?.error?.message || '';
+export async function synthesize(voice, text) {
+  needDrive();
+  let json;
+  try {
+    json = await drive.tts(voice, text);
+  } catch (e) {
+    if (!e.tts) throw e;
+    const err = new Error(apiError(e.raw, e.status));
+    err.status = e.status;
+    err.raw = e.raw;
     throw err;
   }
   await addUsage(text.length);
-  return base64ToBlob(json.audioContent, 'audio/mpeg');
+  return base64ToBlob(json.data, 'audio/mpeg');
 }
 
 const monthKey = () => `usage-${new Date().toISOString().slice(0, 7)}`;
@@ -106,11 +108,11 @@ async function mapLimit(items, limit, fn) {
   return out;
 }
 
-async function synthesizePieces(key, voice, chunk) {
+async function synthesizePieces(voice, chunk) {
   let skipped = 0;
   const piece = async (text, depth) => {
     try {
-      return [await synthesize(key, voice, terminate(text))];
+      return [await synthesize(voice, terminate(text))];
     } catch (e) {
       if (!isTooLong(e)) throw e;
       if (depth >= 3 || text.length < 12) {
@@ -352,7 +354,7 @@ export class CloudEngine {
     if (this.inflight.has(ci)) return this.inflight.get(ci);
     const chunks = this.chunks;
     const chunk = chunks[ci];
-    const { cloudKey, cloudVoice } = this.host.settings();
+    const { cloudVoice } = this.host.settings();
     const p = (async () => {
       const key = await sha256Hex(`${cloudVoice}\n${chunk.text}`);
       let blob = await audioCache.get(key);
@@ -364,16 +366,16 @@ export class CloudEngine {
       // 2) どこにも無ければ生成する
       if (!blob) {
         try {
-          blob = await synthesize(cloudKey, cloudVoice, chunk.text);
+          blob = await synthesize(cloudVoice, chunk.text);
         } catch (e) {
           if (!isTooLong(e)) throw e;
           // 「文が長すぎる」と言われたら、①すべての文を句点で終わらせて再試行
           try {
-            blob = await synthesize(cloudKey, cloudVoice, terminateSoftSplits(chunk));
+            blob = await synthesize(cloudVoice, terminateSoftSplits(chunk));
           } catch (e2) {
             if (!isTooLong(e2)) throw e2;
             // ②それでもダメなら1文ずつ（さらに細かく）作ってつなげる。どうしても断られる文は読み飛ばす
-            const res = await synthesizePieces(cloudKey, cloudVoice, chunk);
+            const res = await synthesizePieces(cloudVoice, chunk);
             blob = res.blob;
             if (res.skipped) this.host.onNotice?.(`表などの読み上げられない部分（${res.skipped}か所）を読み飛ばしました`);
           }

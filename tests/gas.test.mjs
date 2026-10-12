@@ -11,7 +11,7 @@ const iter = (arr) => {
   return { hasNext: () => i < arr.length, next: () => arr[i++] };
 };
 
-function fakeGas({ startWithEmptyParagraph = true } = {}) {
+function fakeGas({ startWithEmptyParagraph = true, fetchImpl = null, oldFiles = null, ttsKey = 'KEY123' } = {}) {
   const docs = new Map(); // id -> { name, children }
   const files = new Map(); // id -> file
   let seq = 0;
@@ -81,7 +81,8 @@ function fakeGas({ startWithEmptyParagraph = true } = {}) {
     getUrl: () => `https://docs.google.com/document/d/${id}/edit`,
   });
 
-  const props = { FOLDER_ID: 'main-folder' };
+  const props = { FOLDER_ID: 'main-folder', ...(ttsKey ? { TTS_API_KEY: ttsKey } : {}) };
+  const fetched = [];
   const ctx = {
     DocumentApp: {
       create: createDoc,
@@ -91,12 +92,24 @@ function fakeGas({ startWithEmptyParagraph = true } = {}) {
     },
     DriveApp: {
       getFileById: (id) => files.get(id),
+      getFoldersByName: (n) =>
+        iter(n === '自分専用の図書館' && oldFiles
+          ? [{ getFiles: () => iter(oldFiles.map((o) => ({ getName: () => o.name, getBlob: () => ({ getDataAsString: () => o.text }) }))) }]
+          : []),
       getFolderById: (id) => {
         if (id === 'main-folder') return folders.main;
         if (folders.audio && id === folders.audio.id) return folders.audio;
         throw new Error('not found');
       },
     },
+    UrlFetchApp: {
+      fetch: (url, opt) => {
+        fetched.push({ url, opt });
+        const r = fetchImpl ? fetchImpl(url, opt) : { code: 200, body: {} };
+        return { getResponseCode: () => r.code, getContentText: () => JSON.stringify(r.body) };
+      },
+    },
+    Logger: { log: () => {} },
     PropertiesService: { getScriptProperties: () => ({ getProperty: (k) => props[k] ?? null, setProperty: (k, v) => (props[k] = v) }) },
     MimeType: { GOOGLE_DOCS: 'gdoc', PLAIN_TEXT: 'text/plain' },
     Utilities: {
@@ -108,7 +121,7 @@ function fakeGas({ startWithEmptyParagraph = true } = {}) {
   vm.createContext(ctx);
   vm.runInContext(CODE, ctx);
   const run = (expr) => JSON.parse(JSON.stringify(vm.runInContext(expr, ctx)));
-  return { run, docs, files };
+  return { run, docs, files, fetched, props };
 }
 
 const REQ = {
@@ -165,4 +178,85 @@ test('音声をDriveに保存して、別の端末から取り出せる（同じ
   assert.deepEqual(run(call('audioGet_', key)), { ok: true, found: true, data });
   assert.equal([...files.values()].filter((f) => f.name === `${key}.mp3`).length, 1);
   assert.throws(() => run(call('audioGet_', '../evil')), /キー/);
+});
+
+// ---- クラウド音声の代理生成 ----
+
+test('tts: GASがスクリプトプロパティのキーでGoogle TTSを呼び、音声を返す（キーはアプリに返さない）', () => {
+  const { run, fetched } = fakeGas({ fetchImpl: () => ({ code: 200, body: { audioContent: 'QUJD' } }) });
+  const res = run(`tts_('ja-JP-Chirp3-HD-Aoede', 'こんにちは。')`);
+  assert.deepEqual(res, { ok: true, data: 'QUJD', chars: 6 });
+  assert.match(fetched[0].url, /text:synthesize\?key=KEY123$/);
+  const sent = JSON.parse(fetched[0].opt.payload);
+  assert.deepEqual(sent.voice, { languageCode: 'ja-JP', name: 'ja-JP-Chirp3-HD-Aoede' });
+  assert.equal(sent.input.text, 'こんにちは。');
+  assert.ok(!JSON.stringify(res).includes('KEY123'));
+});
+
+test('tts: Googleの失敗は status と元のメッセージを付けて返す（「文が長すぎる」の作り直しに使う）', () => {
+  const { run } = fakeGas({ fetchImpl: () => ({ code: 400, body: { error: { message: 'Sentence too long' } } }) });
+  assert.deepEqual(run(`tts_('ja-JP-Neural2-B', 'あ')`), { ok: false, error: 'tts', status: 400, message: 'Sentence too long' });
+});
+
+test('tts: キー未設定・おかしな声の名前は止める', () => {
+  const { run } = fakeGas({ ttsKey: null });
+  assert.throws(() => run(`tts_('ja-JP-Neural2-B', 'あ')`), /TTS_API_KEY/);
+  const g = fakeGas();
+  assert.throws(() => g.run(`tts_('../../x', 'あ')`), /声の名前/);
+});
+
+test('voices: 日本語の声の一覧を返す', () => {
+  const { run, fetched } = fakeGas({ fetchImpl: () => ({ code: 200, body: { voices: [{ name: 'ja-JP-Neural2-B' }] } }) });
+  assert.deepEqual(run('voices_()'), { ok: true, voices: [{ name: 'ja-JP-Neural2-B' }] });
+  assert.match(fetched[0].url, /voices\?languageCode=ja-JP&key=KEY123$/);
+});
+
+// ---- 旧版「自分専用の図書館」からの引っ越し ----
+
+const oldJson = (o) => ({ name: `${o.title}.json`, text: JSON.stringify(o) });
+const OLD = [
+  oldJson({
+    title: '旧記事A', author: 'Aさん', sourceUrl: 'https://x.com/a/status/10', savedAt: '2026-07-01T00:00:00Z',
+    blocks: [
+      { type: 'image', src: 'https://img', alt: '画像' },
+      { type: 'heading', level: 1, text: '見出しA' },
+      { type: 'paragraph', text: '本文A' },
+      { type: 'list', ordered: false, items: ['項目1', '項目2'] },
+      { type: 'quote', text: '引用A' },
+      { type: 'video', src: 'v', poster: 'p', sourceUrl: 's', alt: '動画' },
+    ],
+  }),
+  // 同じ記事の古い保存（新しい方だけ移す）
+  oldJson({ title: '旧記事A（古い）', author: 'Aさん', sourceUrl: 'https://x.com/a/status/10', savedAt: '2026-06-01T00:00:00Z', blocks: [{ type: 'paragraph', text: '古い本文' }] }),
+  oldJson({ title: '旧記事B', author: '', sourceUrl: 'https://note.com/b', savedAt: '2026-07-02T00:00:00Z', blocks: [{ type: 'paragraph', text: '本文B' }] }),
+  { name: '旧記事A.md', text: '# これはJSONではない' },
+];
+
+test('旧版の引っ越し: JSONだけを読み、重複は新しい方、画像・動画は除いて新版の形で保存する', () => {
+  const { run, docs } = fakeGas({ oldFiles: OLD });
+  const res = run('importOldLibrary()');
+  assert.deepEqual(res, { found: 3, saved: 2, skipped: 0 });
+  const saved = [...docs.values()].map((d) => d.children.map((p) => [p.heading, p.text]).filter(([, t]) => t));
+  assert.deepEqual(saved.find((d) => d[0][1] === '旧記事A'), [
+    ['TITLE', '旧記事A'],
+    ['SUBTITLE', 'Aさん / https://x.com/a/status/10'],
+    ['HEADING2', '見出しA'],
+    ['NORMAL', '本文A'],
+    ['NORMAL', '項目1'],
+    ['NORMAL', '項目2'],
+    ['NORMAL', '引用A'],
+  ]);
+  assert.ok(saved.some((d) => d[0][1] === '旧記事B'));
+});
+
+test('旧版の引っ越し: 2回実行しても同じ記事は増えない', () => {
+  const { run, docs } = fakeGas({ oldFiles: OLD });
+  run('importOldLibrary()');
+  run('importOldLibrary()');
+  assert.equal(docs.size, 2);
+});
+
+test('旧版の引っ越し: 旧フォルダが無ければ分かるエラーにする', () => {
+  const { run } = fakeGas();
+  assert.throws(() => run('importOldLibrary()'), /自分専用の図書館/);
 });
