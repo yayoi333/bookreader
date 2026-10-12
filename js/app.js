@@ -11,7 +11,7 @@ const $ = (sel, root = document) => root.querySelector(sel);
 const view = $('#view');
 const player = new Player();
 const APP_URL = new URL('./', location.href).href;
-export const APP_VERSION = '0.5.1';
+export const APP_VERSION = '0.6.0';
 
 const esc = (s) =>
   String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
@@ -128,6 +128,7 @@ async function saveImported(doc, { forceDrive = false } = {}) {
     saveToDrive(saved, { quiet: true });
   }
   if (driveConfigured() && !saved.summary) summarizeDoc(saved.id, { quiet: true });
+  queueExport(saved.id);
   return saved;
 }
 
@@ -151,6 +152,7 @@ async function summarizeDoc(id, { quiet = false } = {}) {
       delete next.summaryError;
       return next;
     });
+    queueExport(id);
   } catch (e) {
     await docs.update(id, (latest) => ({ ...latest, summaryError: e.message }));
     if (!quiet || e.quota) toast(`要約できませんでした：${e.message}`, 6000);
@@ -223,6 +225,35 @@ function applyFilter(list, filter = libraryFilter()) {
 
 async function setStatus(id, status) {
   await docs.update(id, (d) => ({ ...d, status, statusAt: Date.now() }));
+  queueExport(id);
+}
+
+// ---------------------------------------------------------------- 第二の脳：Driveに Markdown と目次を書き出す
+
+const exportTimers = new Map();
+
+/** その記事の Markdown をDriveに書き出す（連続した変更は2秒まとめて1回）。失敗しても画面は止めない */
+function queueExport(id) {
+  if (!driveConfigured()) return;
+  clearTimeout(exportTimers.get(id));
+  exportTimers.set(
+    id,
+    setTimeout(async () => {
+      exportTimers.delete(id);
+      const d = await docs.get(id);
+      if (!d) return;
+      try {
+        await drive.exportMd({
+          id: d.id, title: d.title, url: d.url || '', author: d.author || '', source: d.source || '',
+          publishedAt: d.publishedAt || null, createdAt: d.createdAt || null, status: statusOf(d),
+          summary: d.summary || null, blocks: d.blocks, driveFileId: d.driveFileId || null,
+        });
+        await docs.update(id, (x) => ({ ...x, mdExportedAt: Date.now() }));
+      } catch (e) {
+        console.warn('Markdownの書き出しに失敗', e);
+      }
+    }, 2000),
+  );
 }
 
 /** 未読で要約のある記事。新しい順 */

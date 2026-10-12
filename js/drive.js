@@ -71,4 +71,5 @@ export const drive = {
   tts: (voice, text) => call('tts', { voice, text }),
   voices: () => call('voices'),
   summarize: (doc) => call('summarize', { title: doc.title, blocks: doc.blocks }),
+  exportMd: (doc) => call('exportMd', { doc }),
 };

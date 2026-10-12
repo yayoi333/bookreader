@@ -21,6 +21,9 @@ function fakeGas({ startWithEmptyParagraph = true, fetchImpl = null, oldFiles = 
       const p = {
         text, heading: 'NORMAL',
         getText: () => p.text,
+        getType: () => 'PARAGRAPH',
+        asParagraph: () => p,
+        getHeading: () => p.heading,
         setHeading: (h) => ((p.heading = h), p),
         setIndentStart: () => p, setIndentFirstLine: () => p, setItalic: () => p, setGlyphType: () => p,
         editAsText: () => ({ setLinkUrl: () => {} }),
@@ -33,6 +36,8 @@ function fakeGas({ startWithEmptyParagraph = true, fetchImpl = null, oldFiles = 
     };
     return {
       getParagraphs: () => [...children],
+      getNumChildren: () => children.length,
+      getChild: (i) => children[i],
       appendParagraph: (t) => { const p = para(t); children.push(p); return p; },
       appendListItem: (t) => { const p = para(t); children.push(p); return p; },
       clear: () => { children.splice(0, children.length, para('')); },
@@ -47,23 +52,36 @@ function fakeGas({ startWithEmptyParagraph = true, fetchImpl = null, oldFiles = 
       getLastUpdated: () => new Date(f.updated),
       moveTo: (folder) => ((f.parent = folder.id), f),
       getUrl: () => `https://drive/${id}`,
+      getDateCreated: () => new Date(Date.UTC(2026, 9, 1)),
+      setName: (n) => ((f.name = n), f),
+      setContent: (t) => ((f.text = t), (f.updated = ++seq), f),
+      getBlob: () => ({ getDataAsString: () => f.text ?? '', getBytes: () => [...Buffer.from(f.text ?? '')] }),
       ...extra,
     };
     files.set(id, f);
     return f;
   };
 
-  const folderObj = (id, name) => ({
-    id,
-    getId: () => id,
-    getName: () => name,
-    getFiles: () => iter([...files.values()].filter((f) => f.parent === id)),
-    getFilesByName: (n) => iter([...files.values()].filter((f) => f.parent === id && f.name === n)),
-    getFoldersByName: (n) => iter(n === '音声キャッシュ' && folders.audio ? [folders.audio] : []),
-    createFolder: (n) => (folders.audio = folderObj('audio-folder', n)),
-    createFile: (blob) => makeFile(`audio-${++seq}`, blob.name, 'audio/mpeg', { parent: id, getBlob: () => ({ getBytes: () => blob.bytes }) }) && null,
-  });
-  const folders = { main: folderObj('main-folder', 'よみあげ文庫'), audio: null };
+  const allFolders = new Map(); // id -> folder
+  const folderObj = (id, name, parent = null) => {
+    const folder = {
+      id, parent,
+      getId: () => id,
+      getName: () => name,
+      getFiles: () => iter([...files.values()].filter((f) => f.parent === id)),
+      getFilesByName: (n) => iter([...files.values()].filter((f) => f.parent === id && f.name === n)),
+      getFoldersByName: (n) => iter([...allFolders.values()].filter((x) => x.parent === id && x.getName() === n)),
+      createFolder: (n) => folderObj(`folder-${++seq}`, n, id),
+      createFile: (a, text, mime) => {
+        if (typeof a === 'string') return makeFile(`file-${++seq}`, a, mime, { parent: id, text });
+        makeFile(`audio-${++seq}`, a.name, 'audio/mpeg', { parent: id, getBlob: () => ({ getBytes: () => a.bytes }) });
+        return null;
+      },
+    };
+    allFolders.set(id, folder);
+    return folder;
+  };
+  const folders = { main: folderObj('main-folder', 'よみあげ文庫') };
 
   const createDoc = (title) => {
     const id = `doc-${++seq}`;
@@ -88,12 +106,14 @@ function fakeGas({ startWithEmptyParagraph = true, fetchImpl = null, oldFiles = 
     ...(geminiModel ? { GEMINI_MODEL: geminiModel } : {}),
   };
   const fetched = [];
+  const locks = { n: 0 };
   const ctx = {
     DocumentApp: {
       create: createDoc,
       openById: docHandle,
       ParagraphHeading: { TITLE: 'TITLE', SUBTITLE: 'SUBTITLE', HEADING2: 'HEADING2', NORMAL: 'NORMAL' },
       GlyphType: { BULLET: 'BULLET' },
+      ElementType: { PARAGRAPH: 'PARAGRAPH', LIST_ITEM: 'LIST_ITEM', TABLE: 'TABLE' },
     },
     DriveApp: {
       getFileById: (id) => files.get(id),
@@ -102,8 +122,7 @@ function fakeGas({ startWithEmptyParagraph = true, fetchImpl = null, oldFiles = 
           ? [{ getFiles: () => iter(oldFiles.map((o) => ({ getName: () => o.name, getBlob: () => ({ getDataAsString: () => o.text }) }))) }]
           : []),
       getFolderById: (id) => {
-        if (id === 'main-folder') return folders.main;
-        if (folders.audio && id === folders.audio.id) return folders.audio;
+        if (allFolders.has(id)) return allFolders.get(id);
         throw new Error('not found');
       },
     },
@@ -121,7 +140,14 @@ function fakeGas({ startWithEmptyParagraph = true, fetchImpl = null, oldFiles = 
     },
     PropertiesService: { getScriptProperties: () => ({ getProperty: (k) => props[k] ?? null, setProperty: (k, v) => (props[k] = v) }) },
     MimeType: { GOOGLE_DOCS: 'gdoc', PLAIN_TEXT: 'text/plain' },
+    LockService: { getScriptLock: () => ({ waitLock: () => { locks.n++; }, releaseLock: () => { locks.n--; } }) },
     Utilities: {
+      formatDate: (d, tz, fmt) => {
+        const p = Object.fromEntries(new Intl.DateTimeFormat('en-CA', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' })
+          .formatToParts(d).map((x) => [x.type, x.value]));
+        return fmt.replace('yyyy', p.year).replace('MM', p.month).replace('dd', p.day).replace('HH', p.hour).replace('mm', p.minute);
+      },
+      base64EncodeWebSafe: (s) => Buffer.from(String(s)).toString('base64url'),
       base64Encode: (bytes) => Buffer.from(bytes).toString('base64'),
       base64Decode: (s) => [...Buffer.from(s, 'base64')],
       newBlob: (bytes, type, name) => ({ bytes, type, name }),
@@ -130,7 +156,7 @@ function fakeGas({ startWithEmptyParagraph = true, fetchImpl = null, oldFiles = 
   vm.createContext(ctx);
   vm.runInContext(CODE, ctx);
   const run = (expr) => JSON.parse(JSON.stringify(vm.runInContext(expr, ctx)));
-  return { run, docs, files, fetched, props };
+  return { run, docs, files, fetched, props, locks, allFolders };
 }
 
 const REQ = {
@@ -363,4 +389,85 @@ test('doPost: summarize 操作が使える（トークン必須）', () => {
   const ok = run(post({ token: 'TOKEN1', action: 'summarize', title: 't', blocks: BLOCKS }));
   assert.equal(ok.ok, true);
   assert.equal(ok.summary.tldr, SUMMARY.tldr);
+});
+
+// ---- 第二の脳：Markdown と目次 ----
+
+const mdFiles = (files) => [...files.values()].filter((f) => f.text !== undefined);
+const mdText = (files, name) => mdFiles(files).find((f) => f.name === name)?.text;
+const JST = (y, m, d, h = 12) => Date.UTC(y, m - 1, d, h - 9);
+const EXPORT_DOC = {
+  id: 'a1', title: '動画AIの比較｜徹底解説', url: 'https://note.com/x/n/1', author: 'KAWAI', source: 'web',
+  publishedAt: JST(2026, 8, 3), createdAt: JST(2026, 10, 13), status: 'later',
+  summary: { tldr: '結論の一文。', points: ['要点A', '要点B'], terms: [{ word: '用語', note: '説明' }], verdict: { level: '高', reason: '具体例が多い' } },
+  blocks: [{ type: 'h', text: '見出し' }, { type: 'p', text: '本文です。' }, { type: 'li', text: '項目' }, { type: 'quote', text: '引用' }],
+};
+const exportExpr = (doc) => `exportMd_(${JSON.stringify(doc)})`;
+
+test('Markdown書き出し：md フォルダに要約→本文の順で書き、目次 INDEX.md を作る', () => {
+  const { run, files, allFolders, locks } = fakeGas();
+  const res = run(exportExpr(EXPORT_DOC));
+  assert.equal(res.ok, true);
+  assert.equal(res.file, '20260803-動画AIの比較｜徹底解説.md');
+  const md = mdText(files, res.file);
+  assert.ok(md.startsWith('---\ntitle: "動画AIの比較｜徹底解説"\nurl: "https://note.com/x/n/1"'), md.slice(0, 120));
+  assert.match(md, /published: "2026-08-03"\nsaved: "2026-10-13"\nstatus: "あとで"\nverdict: "高"/);
+  assert.ok(md.indexOf('## 要約') < md.indexOf('## 本文'));
+  assert.match(md, /\*\*結論\*\*：結論の一文。\n\n- 要点A\n- 要点B/);
+  assert.match(md, /- 用語：説明/);
+  assert.match(md, /### 見出し\n\n本文です。\n\n- 項目\n\n> 引用/);
+  // md フォルダは「よみあげ文庫」の中
+  const mdFolder = [...allFolders.values()].find((f) => f.getName() === 'md');
+  assert.equal(mdFolder.parent, 'main-folder');
+  const index = mdText(files, 'INDEX.md');
+  assert.match(index, /まずこの目次だけを読み/);
+  assert.match(index, /記事数：1/);
+  assert.match(index, /\| 2026-08-03 \| 2026-10-13 \| 動画AIの比較｜徹底解説 \| あとで \| 高 \| 結論の一文。 \| 20260803-動画AIの比較｜徹底解説\.md \|/);
+  assert.equal(locks.n, 0, 'ロックは解放される');
+});
+
+test('Markdown書き出し：同じ記事は上書き（増えない）。状態や要約の変化が目次に反映される', () => {
+  const { run, files } = fakeGas();
+  run(exportExpr({ ...EXPORT_DOC, summary: null, status: 'unread' }));
+  assert.match(mdText(files, '20260803-動画AIの比較｜徹底解説.md'), /（まだ要約されていません）/);
+  run(exportExpr({ ...EXPORT_DOC, status: 'done' }));
+  assert.equal(mdFiles(files).filter((f) => f.name.endsWith('.md') && f.name !== 'INDEX.md').length, 1);
+  const index = mdText(files, 'INDEX.md');
+  assert.match(index, /記事数：1/);
+  assert.match(index, /\| 読了 \| 高 \| 結論の一文。 \|/);
+});
+
+test('Markdown書き出し：目次は公開日（無ければ保存日）の新しい順。表を壊す文字は置き換える。同名は分ける', () => {
+  const { run, files } = fakeGas();
+  run(exportExpr({ ...EXPORT_DOC, id: 'old', url: 'https://a/old', title: '古い記事', publishedAt: JST(2025, 1, 1) }));
+  run(exportExpr({ ...EXPORT_DOC, id: 'memo', url: '', title: 'パイプ|入り\nの題', publishedAt: null, createdAt: JST(2026, 10, 12) }));
+  run(exportExpr({ ...EXPORT_DOC, id: 'same', url: 'https://a/same', title: '古い記事', publishedAt: JST(2025, 1, 1) }));
+  const index = mdText(files, 'INDEX.md');
+  const rows = index.split('\n').filter((l) => l.endsWith('.md |'));
+  assert.equal(rows.length, 3);
+  assert.match(rows[0], /^\| — \| 2026-10-12 \| パイプ｜入り の題 \|/);
+  assert.match(rows[1], /^\| 2025-01-01 \|/);
+  const names = rows.slice(1).map((r) => r.split(' | ').at(-1).replace(/ \|$/, ''));
+  assert.notEqual(names[0], names[1], '同じ題・同じ日でもファイル名を分ける');
+  assert.ok(mdFiles(files).some((f) => f.name.startsWith('20261012-パイプ_入り')), 'ファイル名に使えない文字は _');
+});
+
+test('doPost: exportMd 操作が使える（トークン必須）', () => {
+  const { run } = fakeGas();
+  const post = (body) => `JSON.parse(doPost({ postData: { contents: ${JSON.stringify(JSON.stringify(body))} } }).text)`;
+  assert.equal(run(post({ token: 'nope', action: 'exportMd', doc: EXPORT_DOC })).error, 'unauthorized');
+  assert.equal(run(post({ token: 'TOKEN1', action: 'exportMd', doc: EXPORT_DOC })).ok, true);
+});
+
+test('exportAllDocsToMd：保存済みの文書を書き出す。アプリから書き出し済みのものは上書きしない', () => {
+  const { run, files } = fakeGas();
+  run(call('save_', REQ)); // https://x.com/a/status/1
+  run(call('save_', { ...REQ, url: 'https://note.com/x/n/1', title: 'アプリで要約済み' }));
+  run(exportExpr({ ...EXPORT_DOC, title: 'アプリで要約済み' })); // 同じ URL を要約つきで書き出し済み
+  const res = run('exportAllDocsToMd()');
+  assert.deepEqual(res, { found: 2, exported: 1, skipped: 1 });
+  const index = mdText(files, 'INDEX.md');
+  assert.match(index, /記事数：2/);
+  assert.match(index, /\| 記事タイトル \| 未読 \| — \| — \|/);
+  assert.match(index, /\| アプリで要約済み \| あとで \| 高 \| 結論の一文。 \|/);
 });

@@ -16,6 +16,8 @@
  *      スクリプト プロパティに GEMINI_API_KEY として追加。関数「testSummarize」を実行すると、
  *      「よみあげ文庫」フォルダの最新の記事を要約して実行ログに出す。
  *      モデルを変えたいときは GEMINI_MODEL も追加（無ければ gemini-3.5-flash-lite）。
+ *   8. （第二の脳）「よみあげ文庫/md/」に記事ごとの Markdown と目次 INDEX.md を書き出す。アプリから自動で行う。
+ *      それより前に保存した文書は、関数「exportAllDocsToMd」を1回実行すると書き出される。
  *
  * コードを書き換えたら「デプロイを管理」→ 編集 → バージョン「新バージョン」で更新（URLは変わらない）。
  */
@@ -63,6 +65,8 @@ function doPost(e) {
         return json_(voices_());
       case 'summarize':
         return json_(summarize_(req.title, req.blocks));
+      case 'exportMd':
+        return json_(exportMd_(req.doc));
       default:
         return json_({ ok: false, error: '不明な操作です: ' + req.action });
     }
@@ -553,4 +557,223 @@ function testSummarize() {
   Logger.log('記事: ' + doc.title);
   Logger.log(JSON.stringify(res, null, 2));
   return res;
+}
+
+// ---- 第二の脳：記事ごとの Markdown と目次（md/INDEX.md） ----
+// PC の Google ドライブでは Googleドキュメントの中身が読めないため、AI（Claude Code / Codex）が読める
+// Markdown を別に書き出す。目次は index.json（元データ）から毎回作り直す。
+
+const MD_FOLDER_NAME = 'md';
+const INDEX_JSON_NAME = 'index.json';
+const INDEX_MD_NAME = 'INDEX.md';
+const STATUS_JA = { unread: '未読', later: 'あとで', done: '読了' };
+
+function mdFolder_() {
+  const props = PropertiesService.getScriptProperties();
+  const id = props.getProperty('MD_FOLDER_ID');
+  if (id) {
+    try {
+      return DriveApp.getFolderById(id);
+    } catch (e) {
+      // 消されていたら作り直す
+    }
+  }
+  const parent = getFolder_();
+  const it = parent.getFoldersByName(MD_FOLDER_NAME);
+  const folder = it.hasNext() ? it.next() : parent.createFolder(MD_FOLDER_NAME);
+  props.setProperty('MD_FOLDER_ID', folder.getId());
+  return folder;
+}
+
+function ymd_(ms) {
+  return ms ? Utilities.formatDate(new Date(Number(ms)), 'Asia/Tokyo', 'yyyy-MM-dd') : '';
+}
+
+function safeName_(title) {
+  return String(title || '無題').replace(/[\\/:*?"<>|\r\n\t#]/g, '_').replace(/\s+/g, ' ').trim().slice(0, 60) || '無題';
+}
+
+/** 記事の見分け方：元URL → Driveの文書ID → アプリ内のID */
+function mdKey_(doc) {
+  if (doc.url) return String(doc.url);
+  if (doc.driveFileId) return 'gdoc:' + doc.driveFileId;
+  return 'id:' + doc.id;
+}
+
+function blocksToMarkdown_(blocks) {
+  return (blocks || []).map(function (b) {
+    const t = String((b && b.text) || '').trim();
+    if (!t) return '';
+    if (b.type === 'h') return '### ' + t;
+    if (b.type === 'li') return '- ' + t;
+    if (b.type === 'quote') return t.split('\n').map(function (l) { return '> ' + l; }).join('\n');
+    return t;
+  }).filter(String).join('\n\n');
+}
+
+function docToMarkdown_(doc) {
+  const s = doc.summary;
+  const q = function (v) { return JSON.stringify(String(v == null ? '' : v)); }; // YAML として安全な書き方
+  const lines = [
+    '---',
+    'title: ' + q(doc.title),
+    'url: ' + q(doc.url || ''),
+    'author: ' + q(doc.author || ''),
+    'source: ' + q(doc.source || ''),
+    'published: ' + q(ymd_(doc.publishedAt)),
+    'saved: ' + q(ymd_(doc.createdAt)),
+    'status: ' + q(STATUS_JA[doc.status] || '未読'),
+    'verdict: ' + q((s && s.verdict && s.verdict.level) || ''),
+    '---',
+    '',
+    '# ' + String(doc.title || '無題'),
+    '',
+    '## 要約',
+    '',
+  ];
+  if (s) {
+    lines.push('**結論**：' + s.tldr, '');
+    (s.points || []).forEach(function (p) { lines.push('- ' + p); });
+    if ((s.terms || []).length) {
+      lines.push('', '**用語**', '');
+      s.terms.forEach(function (t) { lines.push('- ' + t.word + '：' + t.note); });
+    }
+    if (s.verdict) lines.push('', '**全文を読む価値**：' + s.verdict.level + (s.verdict.reason ? '（' + s.verdict.reason + '）' : ''));
+  } else {
+    lines.push('（まだ要約されていません）');
+  }
+  lines.push('', '## 本文', '', blocksToMarkdown_(doc.blocks), '');
+  return lines.join('\n');
+}
+
+function readIndex_(folder) {
+  const it = folder.getFilesByName(INDEX_JSON_NAME);
+  if (!it.hasNext()) return { file: null, data: {} };
+  const file = it.next();
+  try {
+    return { file: file, data: JSON.parse(file.getBlob().getDataAsString('UTF-8')) || {} };
+  } catch (e) {
+    return { file: file, data: {} };
+  }
+}
+
+function writeText_(folder, existing, name, text, mime) {
+  if (existing) {
+    existing.setContent(text);
+    return existing;
+  }
+  const it = folder.getFilesByName(name);
+  if (it.hasNext()) {
+    const f = it.next();
+    f.setContent(text);
+    return f;
+  }
+  return folder.createFile(name, text, mime);
+}
+
+const cell_ = function (v) { return String(v == null ? '' : v).replace(/\|/g, '｜').replace(/\s*\n\s*/g, ' ').trim(); };
+
+function indexMarkdown_(data) {
+  const rows = Object.keys(data).map(function (k) { return data[k]; });
+  rows.sort(function (a, b) {
+    return String(b.published || b.saved).localeCompare(String(a.published || a.saved)) || String(b.saved).localeCompare(String(a.saved));
+  });
+  const head = [
+    '# よみあげ文庫 目次',
+    '',
+    '> AI（Claude Code / Codex）へ：まずこの目次だけを読み、質問に関係する行の「ファイル」だけを開いてください。',
+    '> md フォルダのファイルを全部読む・全文を検索して全部開く、はしないでください。各ファイルは先頭に「## 要約」があります。',
+    '',
+    '更新：' + Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd HH:mm') + '（日本時間）／ 記事数：' + rows.length,
+    '',
+    '| 公開日 | 保存日 | タイトル | 状態 | 読む価値 | 要約（1行） | ファイル |',
+    '|---|---|---|---|---|---|---|',
+  ];
+  return head.concat(rows.map(function (r) {
+    return '| ' + [r.published || '—', r.saved || '—', cell_(r.title), r.status || '未読', r.verdict || '—', cell_(r.tldr) || '—', r.file].join(' | ') + ' |';
+  })).join('\n') + '\n';
+}
+
+/** 1本の記事を書き出して index.json の項目を更新する（目次の保存は呼び出し側） */
+function exportOne_(folder, data, doc) {
+  const key = mdKey_(doc);
+  const prev = data[key];
+  const date = ymd_(doc.publishedAt || doc.createdAt).replace(/-/g, '') || '00000000';
+  let name = date + '-' + safeName_(doc.title) + '.md';
+  // 別の記事が同じファイル名を使っていたら、末尾に印を付けて分ける
+  const taken = Object.keys(data).some(function (k) { return k !== key && data[k].file === name; });
+  if (taken) name = name.replace(/\.md$/, '-' + Utilities.base64EncodeWebSafe(key).replace(/[^A-Za-z0-9]/g, '').slice(-6) + '.md');
+  let file = null;
+  if (prev && prev.fileId) {
+    try {
+      file = DriveApp.getFileById(prev.fileId);
+    } catch (e) {
+      file = null;
+    }
+  }
+  file = writeText_(folder, file, name, docToMarkdown_(doc), 'text/markdown');
+  if (file.getName() !== name) file.setName(name);
+  file.setDescription(key);
+  const s = doc.summary;
+  data[key] = {
+    file: name,
+    fileId: file.getId(),
+    title: String(doc.title || '無題'),
+    url: doc.url || '',
+    published: ymd_(doc.publishedAt),
+    saved: ymd_(doc.createdAt),
+    status: STATUS_JA[doc.status] || '未読',
+    verdict: (s && s.verdict && s.verdict.level) || '',
+    tldr: (s && s.tldr) || '',
+  };
+  return name;
+}
+
+function saveIndex_(folder, idx) {
+  writeText_(folder, idx.file, INDEX_JSON_NAME, JSON.stringify(idx.data), 'application/json');
+  writeText_(folder, null, INDEX_MD_NAME, indexMarkdown_(idx.data), 'text/markdown');
+}
+
+/** アプリから：記事1本を Markdown にして、目次を更新 */
+function exportMd_(doc) {
+  if (!doc || !doc.title) throw new Error('書き出す記事がありません');
+  const lock = LockService.getScriptLock();
+  lock.waitLock(30000); // スマホとPCから同時に来ても目次が欠けないように
+  try {
+    const folder = mdFolder_();
+    const idx = readIndex_(folder);
+    const name = exportOne_(folder, idx.data, doc);
+    saveIndex_(folder, idx);
+    return { ok: true, file: name, count: Object.keys(idx.data).length };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/** GASエディタで1回実行：「よみあげ文庫」フォルダのGoogleドキュメントで、まだ目次に無いものを書き出す */
+function exportAllDocsToMd() {
+  const lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    const folder = mdFolder_();
+    const idx = readIndex_(folder);
+    const result = { found: 0, exported: 0, skipped: 0 };
+    list_('').files.forEach(function (f) {
+      if (f.mimeType !== MimeType.GOOGLE_DOCS) return;
+      result.found++;
+      const g = get_(f.id);
+      const doc = { title: g.title, url: g.sourceUrl || '', driveFileId: f.id, blocks: g.blocks || [], createdAt: DriveApp.getFileById(f.id).getDateCreated().getTime() };
+      if (idx.data[mdKey_(doc)]) {
+        result.skipped++; // アプリから書き出し済み（要約・状態つき）のものは上書きしない
+        return;
+      }
+      exportOne_(folder, idx.data, doc);
+      result.exported++;
+    });
+    saveIndex_(folder, idx);
+    Logger.log('Markdownの書き出し: 文書 ' + result.found + '件 → 書き出し ' + result.exported + '件（済みで飛ばした ' + result.skipped + '件）');
+    return result;
+  } finally {
+    lock.releaseLock();
+  }
 }

@@ -113,6 +113,7 @@ test('ブラウザでの取り込み・読み上げ・進捗・クラウド音�
   // 自分の GAS（Drive連携・クラウド音声の代理生成）の偽物。Google TTS はアプリから直接呼ばれない
   const gasCalls = [];
   const summarizeCalls = [];
+  const exportCalls = [];
   const failSummary = { on: true };
   const audioStore = new Map();
   const directTts = [];
@@ -136,6 +137,10 @@ test('ブラウザでの取り込み・読み上げ・進捗・クラウド音�
         { name: 'ja-JP-Wavenet-B', ssmlGender: 'FEMALE', languageCodes: ['ja-JP'] },
         { name: 'ja-JP-Chirp3-HD-Aoede', ssmlGender: 'FEMALE', languageCodes: ['ja-JP'] },
       ] });
+    }
+    if (body.action === 'exportMd') {
+      exportCalls.push(body.doc);
+      return reply({ ok: true, file: `${body.doc.title}.md`, count: exportCalls.length });
     }
     if (body.action === 'summarize') {
       summarizeCalls.push(body);
@@ -636,6 +641,29 @@ test('ブラウザでの取り込み・読み上げ・進捗・クラウド音�
       assert.ok(x && x[1].includes(xDate), JSON.stringify(x) + ' / ' + xDate);
       await popup.close();
       await article.close();
+    });
+
+    await t.test('第二の脳：取り込み→要約→状態変更のたびに、要約と状態つきでMarkdownを書き出す（連続した変更はまとめる）', async () => {
+      await page.goto(base + '#/');
+      await page.waitForSelector('#import-input');
+      const before = exportCalls.length;
+      await page.fill('#import-input', '書き出しテスト記事\n\n第二の脳に入る本文です。');
+      await page.click('#import-btn');
+      await page.waitForSelector('#summary-box .tldr', { timeout: 5000 });
+      // 取り込み直後と要約の到着は2秒以内なので、1回にまとまる
+      await page.waitForTimeout(2600);
+      const first = exportCalls.slice(before).filter((d) => d.title === '書き出しテスト記事');
+      assert.equal(first.length, 1, `書き出し回数 ${first.length}`);
+      assert.equal(first[0].summary.tldr, '「書き出しテスト記事」の結論です。');
+      assert.equal(first[0].status, 'unread');
+      assert.deepEqual(first[0].blocks.map((b) => b.text), ['書き出しテスト記事', '第二の脳に入る本文です。']);
+      assert.ok(first[0].createdAt > 0);
+      // 状態を変えると、もう一度書き出す
+      await page.click('#status-later');
+      await page.waitForTimeout(2600);
+      const after = exportCalls.slice(before).filter((d) => d.title === '書き出しテスト記事');
+      assert.equal(after.length, 2);
+      assert.equal(after[1].status, 'later');
     });
 
     assert.deepEqual(directTts, [], 'アプリから Google TTS を直接呼んでいない');
