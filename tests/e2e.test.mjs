@@ -411,6 +411,63 @@ test('ブラウザでの取り込み・読み上げ・進捗・クラウド音�
       assert.equal(summarizeCalls.length, before + 1);
     });
 
+    await t.test('要約を聴く：読み上げる内容が本文から要約に変わり、▶で本文に戻せる', async () => {
+      await page.goto(base + '#/');
+      await page.waitForSelector('.doc-title');
+      await page.click('text=要約テスト記事');
+      await page.waitForSelector('#summary-play');
+      const before = ttsRequests.length;
+      await page.click('#summary-play');
+      await page.waitForFunction(() => document.querySelector('#p-pos').textContent === '読了', null, { timeout: 15000 });
+      assert.equal(await page.textContent('#p-title'), '要約テスト記事（要約）');
+      const spoken = ttsRequests.slice(before).map((r) => r.input.text).join('');
+      assert.match(spoken, /「要約テスト記事」の結論です/);
+      assert.match(spoken, /一つ目の要点/);
+      assert.match(spoken, /テスト用語/);
+      assert.match(spoken, /全文も読む価値は、高です/);
+      assert.doesNotMatch(spoken, /本文の一文目/);
+      // 要約を聴いている間、本文のハイライトは動かない
+      assert.equal(await page.$('.reader-body .seg.current'), null);
+      // ▶（本文）を押すと本文に戻る
+      const before2 = ttsRequests.length;
+      await page.click('#read-btn');
+      await page.waitForFunction(() => document.querySelector('#p-pos').textContent === '読了', null, { timeout: 15000 });
+      assert.equal(await page.textContent('#p-title'), '要約テスト記事');
+      assert.match(ttsRequests.slice(before2).map((r) => r.input.text).join(''), /本文の一文目/);
+    });
+
+    await t.test('まとめて聴く：未読の要約を新しい順に、タイトルを読んでから続けて再生する', async () => {
+      // 未読の要約を3本以上にする（ここまでの記事の多くは本文を聴き終えている）
+      await page.goto(base + '#/');
+      await page.waitForSelector('#import-input');
+      await page.fill('#import-input', 'まとめ用の記事\n\nまとめて聴くための記事です。');
+      await page.click('#import-btn');
+      await page.waitForSelector('#summary-box .tldr', { timeout: 5000 });
+      await page.goto(base + '#/');
+      await page.waitForSelector('#queue-play');
+      const label = await page.textContent('#queue-play');
+      const n = Number(label.match(/（(\d+)本）/)[1]);
+      assert.ok(n >= 3, label);
+      // 未読＝本文を聴き終えていない記事。直前に本文を聴き終えた「要約テスト記事」は入らない
+      const titles = await page.evaluate(async () => {
+        const db = await new Promise((r) => { const q = indexedDB.open('yomiage'); q.onsuccess = () => r(q.result); });
+        const all = await new Promise((r) => { const q = db.transaction('docs').objectStore('docs').getAll(); q.onsuccess = () => r(q.result); });
+        return all.filter((d) => d.summary).sort((a, b) => b.updatedAt - a.updatedAt).map((d) => d.title);
+      });
+      const before = ttsRequests.length;
+      await page.click('#queue-play');
+      await page.waitForFunction(() => document.querySelector('#p-pos').textContent === '読了', null, { timeout: 30000 });
+      assert.match(await page.textContent('#p-title'), new RegExp(`未読の要約（${n}本）`));
+      const spoken = ttsRequests.slice(before).map((r) => r.input.text).join('');
+      for (let i = 1; i <= n; i++) assert.match(spoken, new RegExp(`${i}本目`));
+      assert.doesNotMatch(spoken, /要約テスト記事」の結論/, '聴き終えた記事は入らない');
+      assert.match(spoken, /要約失敗する記事/);
+      assert.doesNotMatch(spoken, /テスト用語/, 'まとめて聴くでは用語を省く');
+      // 1本目が一番新しい記事
+      const unreadTitles = titles.filter((t) => t !== '要約テスト記事');
+      assert.ok(spoken.indexOf(`1本目。${unreadTitles[0]}`) >= 0, `${unreadTitles[0]} / ${spoken.slice(0, 80)}`);
+    });
+
     await t.test('クラウド音声をDriveで共有：別の端末（音声キャッシュ無し）でも生成し直さない', async () => {
       // この端末で作った音声を再生すると Drive に送られる
       await page.goto(base + '#/');

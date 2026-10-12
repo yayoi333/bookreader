@@ -11,7 +11,7 @@ const $ = (sel, root = document) => root.querySelector(sel);
 const view = $('#view');
 const player = new Player();
 const APP_URL = new URL('./', location.href).href;
-export const APP_VERSION = '0.3.0';
+export const APP_VERSION = '0.4.0';
 
 const esc = (s) =>
   String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
@@ -174,6 +174,54 @@ async function refreshSummaryUI(id) {
 }
 
 const VERDICT_LABEL = { 高: '全文も読む価値：高', 中: '全文も読む価値：中', 低: '要約で十分' };
+const VERDICT_SPOKEN = { 高: '全文も読む価値は、高です。', 中: '全文も読む価値は、中くらいです。', 低: '要約で十分な記事です。' };
+
+/** 要約 → 読み上げ用のブロック。withTerms=false は「まとめて聴く」用（用語を省いて短く） */
+function summaryToBlocks(s, { withTerms = true } = {}) {
+  const blocks = [{ type: 'p', text: s.tldr }];
+  (s.points || []).forEach((p) => blocks.push({ type: 'li', text: p }));
+  if (withTerms) (s.terms || []).forEach((t) => blocks.push({ type: 'li', text: `${t.word}。${t.note}` }));
+  const v = s.verdict?.level || '中';
+  blocks.push({ type: 'p', text: [VERDICT_SPOKEN[v] || VERDICT_SPOKEN['中'], s.verdict?.reason].filter(Boolean).join('') });
+  return blocks;
+}
+
+/** 1本の記事の要約を聴くための、仮の記事（本棚には保存しない） */
+function summaryListenDoc(doc) {
+  return {
+    id: `summary:${doc.id}`,
+    kind: 'summary',
+    link: `#/doc/${doc.id}`,
+    title: `${doc.title}（要約）`,
+    author: doc.author,
+    url: doc.url,
+    blocks: [{ type: 'h', text: 'AI要約' }, ...summaryToBlocks(doc.summary)],
+    updatedAt: doc.summary.at || 0,
+  };
+}
+
+/** 未読（本文を聴き終えていない）で要約のある記事。新しい順 */
+function unreadSummarized(list) {
+  return list.filter((d) => d.summary && (d.progress || 0) < buildSegments(d.blocks).length);
+}
+
+/** 未読の要約をつなげた仮の記事。1本ごとにタイトルを読んでから要約へ */
+function summaryQueueDoc(list) {
+  const items = unreadSummarized(list).slice(0, 20);
+  const blocks = [];
+  items.forEach((d, i) => {
+    blocks.push({ type: 'h', text: `${i + 1}本目。${d.title}` });
+    blocks.push(...summaryToBlocks(d.summary, { withTerms: false }));
+  });
+  return {
+    id: `summary-queue:${items.map((d) => d.id).join(',')}`,
+    kind: 'summary-queue',
+    link: '#/',
+    title: `未読の要約（${items.length}本）`,
+    blocks,
+    updatedAt: Math.max(0, ...items.map((d) => d.summary.at || 0)),
+  };
+}
 
 function summaryLineHtml(d) {
   const s = d.summary;
@@ -203,7 +251,8 @@ function summaryBoxHtml(doc) {
       ${terms}
       ${s.verdict?.reason ? `<p class="hint">${esc(s.verdict.reason)}</p>` : ''}
       ${s.truncated ? '<p class="hint">長い記事なので、前半だけを要約しています。</p>' : ''}
-      <div class="row"><button class="ghost small" id="summary-btn">作り直す</button></div>
+      <div class="row"><button class="primary small" id="summary-play">${ICONS.play}<span>要約を聴く</span></button>
+        <button class="ghost small" id="summary-btn">作り直す</button></div>
     </section>`;
   }
   if (!driveConfigured()) {
@@ -219,6 +268,16 @@ function summaryBoxHtml(doc) {
 function bindSummaryBox(id) {
   const btn = $('#summary-btn');
   if (btn) btn.onclick = () => summarizeDoc(id);
+  const play = $('#summary-play');
+  if (play) {
+    play.onclick = async () => {
+      const doc = await docs.get(id);
+      if (!doc?.summary) return;
+      // iOS の再生許可のため、クリック処理の流れの中で load → play
+      player.load(summaryListenDoc(doc));
+      player.play(0);
+    };
+  }
 }
 
 async function saveToDrive(doc, { quiet = false } = {}) {
@@ -328,6 +387,11 @@ async function renderLibrary() {
     <section>
       <h2 class="section-title">本棚 <span class="count">${list.length}</span></h2>
       ${
+        unreadSummarized(list).length
+          ? `<button id="queue-play" class="primary queue-btn">${ICONS.play}<span>未読の要約をまとめて聴く（${Math.min(20, unreadSummarized(list).length)}本）</span></button>`
+          : ''
+      }
+      ${
         list.length
           ? `<ul class="doc-list">${list.map(docItem).join('')}</ul>`
           : `<p class="empty">まだ何もありません。上の欄にXの記事やWeb記事のURLを貼るか、
@@ -335,6 +399,14 @@ async function renderLibrary() {
       }
     </section>`;
   refreshInstallUi();
+  const queueBtn = $('#queue-play');
+  if (queueBtn) {
+    queueBtn.onclick = () => {
+      // iOS の再生許可のため、クリック処理の中で同期的に load → play（一覧は描画時のもの）
+      player.load(summaryQueueDoc(list));
+      player.play(0);
+    };
+  }
   $('#import-btn').onclick = () => {
     const v = $('#import-input').value;
     if (v.trim()) importAndOpen(v);
@@ -390,8 +462,12 @@ async function renderReader(id) {
     view.innerHTML = '<p class="empty">見つかりませんでした。<a href="#/">本棚へ</a></p>';
     return;
   }
-  player.load(doc);
-  const segs = player.segments;
+  // 要約（仮の記事）を聴いている最中は、記事を開いても再生を止めない
+  const listeningSummary = player.doc?.kind && (player.playing || player.loading);
+  if (!listeningSummary) player.load(doc);
+  const segs = buildSegments(doc.blocks);
+  const bodyIndex = player.doc?.id === doc.id ? player.index : Math.min(doc.progress || 0, segs.length);
+  const bodyFinished = segs.length > 0 && bodyIndex >= segs.length;
   let html = '';
   let listOpen = false;
   doc.blocks.forEach((b, bi) => {
@@ -417,12 +493,12 @@ async function renderReader(id) {
 
   const meta = [doc.author, fmtDate(doc.publishedAt || doc.createdAt)].filter(Boolean).map(esc).join(' · ');
   view.innerHTML = `
-    <article class="reader">
+    <article class="reader" data-doc="${esc(doc.id)}">
       <header class="reader-head">
         <h1>${esc(doc.title)}</h1>
         <p class="doc-meta">${meta}${doc.url ? ` · <a href="${esc(doc.url)}" target="_blank" rel="noopener">元のページ</a>` : ''}</p>
         <div class="row">
-          <button id="read-btn" class="primary">${ICONS.play}<span>${player.index > 0 && !player.finished ? '続きから聞く' : '最初から聞く'}</span></button>
+          <button id="read-btn" class="primary">${ICONS.play}<span>${bodyIndex > 0 && !bodyFinished ? '続きから聞く' : '最初から聞く'}</span></button>
           ${
             doc.driveFileId
               ? `<a class="ghost btn" href="${esc(doc.driveUrl)}" target="_blank" rel="noopener">Driveで開く</a>`
@@ -433,7 +509,10 @@ async function renderReader(id) {
       ${summaryBoxHtml(doc)}
       <div class="reader-body">${html || '<p class="empty">本文がありません</p>'}</div>
     </article>`;
-  $('#read-btn').onclick = () => player.play(player.finished ? 0 : player.index);
+  $('#read-btn').onclick = () => {
+    if (player.doc?.id !== doc.id) player.load(doc);
+    player.play(player.finished ? 0 : player.index);
+  };
   bindSummaryBox(doc.id);
   const driveBtn = $('#drive-btn');
   if (driveBtn) {
@@ -451,6 +530,7 @@ async function renderReader(id) {
   $('.reader-body').onclick = (e) => {
     const seg = e.target.closest('.seg');
     if (!seg || String(window.getSelection()).length) return;
+    if (player.doc?.id !== doc.id) player.load(doc);
     const i = Number(seg.dataset.i);
     if (player.playing || player.loading) player.seek(i);
     else player.play(i);
@@ -461,7 +541,8 @@ async function renderReader(id) {
 
 let lastHighlighted = null;
 function highlight(scroll) {
-  const el = view.querySelector(`.seg[data-i="${player.index}"]`);
+  const reading = player.doc && view.querySelector('.reader')?.dataset.doc === player.doc.id;
+  const el = reading ? view.querySelector(`.seg[data-i="${player.index}"]`) : null;
   if (lastHighlighted && lastHighlighted !== el) lastHighlighted.classList.remove('current');
   if (!el) return;
   el.classList.add('current');
@@ -485,7 +566,7 @@ function setupPlayerBar() {
   $('#p-next').onclick = () => player.next();
   $('#p-prev').innerHTML = ICONS.prev;
   $('#p-next').innerHTML = ICONS.next;
-  $('#p-title').onclick = () => player.doc && (location.hash = `#/doc/${player.doc.id}`);
+  $('#p-title').onclick = () => player.doc && (location.hash = player.doc.link || `#/doc/${player.doc.id}`);
   $('#p-seek').oninput = (e) => player.seek(Number(e.target.value));
 
   player.addEventListener('position', () => {
