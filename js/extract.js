@@ -117,6 +117,7 @@ export function docFromPageHtml(html, url, { selection } = {}) {
   const fallbackTitle = dom.title;
   // Readability は DOM を書き換えるので、日付は先に探しておく（Readability の結果は後で優先する）
   const pagePublishedAt = publishedAtFromDom(dom);
+  keepEmbedsAsLinks(dom);
   let article = null;
   if (typeof window.Readability === 'function') {
     try {
@@ -145,6 +146,31 @@ export function docFromPageHtml(html, url, { selection } = {}) {
     publishedAt: toTime(article?.publishedTime) || pagePublishedAt,
     blocks,
   };
+}
+
+/**
+ * 埋め込み（noteのThreads・YouTube等、iframe）は本文抽出で消えるので、
+ * 「埋め込み：URL」の段落に置き換えて残す（URLは読み上げでは飛ばされる）
+ */
+export function keepEmbedsAsLinks(dom) {
+  const toPara = (el, src) => {
+    let href;
+    try {
+      href = new URL(src, dom.baseURI).href;
+    } catch {
+      return;
+    }
+    if (!/^https?:/.test(href)) return;
+    const p = dom.createElement('p');
+    p.textContent = `埋め込み：${href}`;
+    el.replaceWith(p);
+  };
+  dom.querySelectorAll('figure[embedded-service][data-src]').forEach((f) => toPara(f, f.getAttribute('data-src')));
+  // noscript 内（計測タグ）や大きさ0の iframe は本文ではないので触らない
+  dom.querySelectorAll('iframe[src]').forEach((f) => {
+    if (f.closest('noscript') || f.getAttribute('width') === '0' || f.getAttribute('height') === '0') return;
+    toPara(f, f.getAttribute('src'));
+  });
 }
 
 /** 「記事名 | サイト名」「記事名 - サイト名」のサイト名部分を落とす */

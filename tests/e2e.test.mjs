@@ -604,6 +604,33 @@ test('ブラウザでの取り込み・読み上げ・進捗・クラウド音�
       await article.close();
     });
 
+    await t.test('埋め込み：noteの埋め込みやiframeを「埋め込み：URL」として本文に残し、リンクにする', async () => {
+      const texts = await page.evaluate(async (b) => {
+        const { docFromPageHtml } = await import(b + 'js/extract.js');
+        const html = await (await fetch(b + 'tests/fixtures/embed-article.html')).text();
+        return docFromPageHtml(html, 'https://example.com/embed').blocks.map((x) => x.text);
+      }, base);
+      const at = (s) => texts.indexOf(s);
+      assert.ok(at('埋め込み：https://www.threads.com/@dog_mather') > at('先に、アカウントはこちら。'), JSON.stringify(texts));
+      assert.ok(at('埋め込み：https://www.threads.com/share/F8Visi0i0/') > 0, JSON.stringify(texts));
+      assert.ok(at('埋め込み：https://www.youtube.com/embed/abc123') > 0, JSON.stringify(texts));
+      assert.ok(!texts.some((s) => /iframely|googletagmanager/.test(s)), JSON.stringify(texts));
+      // 記事画面ではリンクになり、読み上げではURLを飛ばす
+      await page.goto(base + '#/help');
+      await page.waitForSelector('#bm-code');
+      const code = decodeURIComponent((await page.textContent('#bm-code')).replace(/^javascript:/, ''));
+      const article = await context.newPage();
+      await article.goto(base + 'tests/fixtures/embed-article.html');
+      const [popup] = await Promise.all([context.waitForEvent('page'), article.evaluate(code)]);
+      await popup.waitForSelector('.reader h1', { timeout: 10000 });
+      const hrefs = await popup.$$eval('.reader-body a', (as) => as.map((a) => a.href));
+      assert.ok(hrefs.includes('https://www.threads.com/share/F8Visi0i0/'), JSON.stringify(hrefs));
+      const { normalizeForSpeech } = await import('../js/text.js');
+      assert.equal(normalizeForSpeech('埋め込み：https://www.threads.com/share/F8Visi0i0/'), '埋め込み：');
+      await popup.close();
+      await article.close();
+    });
+
     await t.test('日付：元記事の公開日が取れればそれを本棚に出し、無ければ取り込んだ日', async () => {
       const result = await page.evaluate(async (b) => {
         const { docFromPageHtml } = await import(b + 'js/extract.js');

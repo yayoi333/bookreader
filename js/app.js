@@ -11,10 +11,14 @@ const $ = (sel, root = document) => root.querySelector(sel);
 const view = $('#view');
 const player = new Player();
 const APP_URL = new URL('./', location.href).href;
-export const APP_VERSION = '0.6.0';
+export const APP_VERSION = '0.6.1';
 
 const esc = (s) =>
   String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
+
+/** エスケープ済みの本文中のURLをリンクにする（埋め込みを残した「埋め込み：URL」など） */
+const linkify = (html) =>
+  html.replace(/https?:\/\/[^\s<>"'）)\]】」』]+/g, (u) => `<a href="${u}" target="_blank" rel="noopener">${u}</a>`);
 
 const ICONS = {
   play: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5v13l11-6.5z" fill="currentColor"/></svg>',
@@ -566,7 +570,7 @@ async function renderReader(id) {
   doc.blocks.forEach((b, bi) => {
     const spans = [];
     segs.forEach((s, i) => {
-      if (s.block === bi) spans.push(`<span class="seg" data-i="${i}">${esc(s.text)}</span>`);
+      if (s.block === bi) spans.push(`<span class="seg" data-i="${i}">${linkify(esc(s.text))}</span>`);
     });
     const inner = spans.join('');
     if (b.type === 'li' && !listOpen) {
@@ -632,7 +636,7 @@ async function renderReader(id) {
   }
   $('.reader-body').onclick = (e) => {
     const seg = e.target.closest('.seg');
-    if (!seg || String(window.getSelection()).length) return;
+    if (!seg || e.target.closest('a') || String(window.getSelection()).length) return;
     if (player.doc?.id !== doc.id) player.load(doc);
     const i = Number(seg.dataset.i);
     if (player.playing || player.loading) player.seek(i);
